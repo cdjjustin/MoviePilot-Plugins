@@ -81,8 +81,8 @@ class AudiobookPodcast(_PluginBase):
     plugin_desc = "扫描本地有声书目录，生成 iOS 播客（Apple Podcasts）兼容的 RSS 2.0 订阅源"
     plugin_icon = "Podcast_A.png"
     plugin_version = "1.0.0"
-    plugin_author = "your-name"
-    author_url = "https://github.com/your-name"
+    plugin_author = "cdjjustin"
+    author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookpodcast_"
     plugin_order = 50
     auth_level = 1
@@ -561,40 +561,68 @@ class AudiobookPodcast(_PluginBase):
         else:
             cover_url = ""
 
+        # ── 按第一级子目录分季 ──
+        # season_key: "" 表示直接放在 book_path 下（无子目录）
+        season_buckets: Dict[str, List[Path]] = {}
+        for f in files:
+            rel_parts = f.relative_to(book_path).parts
+            key = rel_parts[0] if len(rel_parts) > 1 else ""
+            season_buckets.setdefault(key, []).append(f)
+
+        # 按子目录名排序，保证季序稳定
+        sorted_seasons = sorted(season_buckets.keys())
+        has_seasons = len(sorted_seasons) > 1 or (
+            len(sorted_seasons) == 1 and sorted_seasons[0] != ""
+        )
+
         # <item> 列表
         items: List[str] = []
-        for idx, f in enumerate(files, 1):
-            try:
-                stat = f.stat()
-                file_size: int = stat.st_size
-                mtime: float = stat.st_mtime
-            except OSError:
-                logger.warning(f"[AudiobookPodcast] 无法读取文件信息：{f}")
-                continue
+        for season_num, season_key in enumerate(sorted_seasons, 1):
+            season_files = season_buckets[season_key]
+            for ep_num, f in enumerate(season_files, 1):
+                try:
+                    stat = f.stat()
+                    file_size: int = stat.st_size
+                    mtime: float = stat.st_mtime
+                except OSError:
+                    logger.warning(f"[AudiobookPodcast] 无法读取文件信息：{f}")
+                    continue
 
-            mime = MIME_TYPES.get(f.suffix.lower(), "audio/mpeg")
-            url = _audio_url(f)
-            guid = hashlib.sha1(f"{name}/{f.relative_to(book_path)}".encode()).hexdigest()
-            pub_date = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
-                "%a, %d %b %Y %H:%M:%S %z"
-            )
-            episode_title = xe(f"{idx:03d}. {f.stem}")
-            duration_tag = ""
-            duration = self._get_audio_duration(f)
-            if duration:
-                duration_tag = f"      <itunes:duration>{duration}</itunes:duration>\n"
+                mime = MIME_TYPES.get(f.suffix.lower(), "audio/mpeg")
+                url = _audio_url(f)
+                guid = hashlib.sha1(f"{name}/{f.relative_to(book_path)}".encode()).hexdigest()
+                pub_date = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
+                    "%a, %d %b %Y %H:%M:%S %z"
+                )
+                # 标题：多季时加季号前缀
+                if has_seasons and season_key:
+                    episode_title = xe(f"[{season_key}] {ep_num:03d}. {f.stem}")
+                else:
+                    episode_title = xe(f"{ep_num:03d}. {f.stem}")
 
-            items.append(
-                f"    <item>\n"
-                f"      <title>{episode_title}</title>\n"
-                f'      <enclosure url="{xe(url)}" length="{file_size}" type="{mime}"/>\n'
-                f'      <guid isPermaLink="false">{guid}</guid>\n'
-                f"      <pubDate>{pub_date}</pubDate>\n"
-                f"      <itunes:title>{episode_title}</itunes:title>\n"
-                f"      <itunes:episode>{idx}</itunes:episode>\n"
-                f"{duration_tag}"
-                f"    </item>"
-            )
+                duration_tag = ""
+                duration = self._get_audio_duration(f)
+                if duration:
+                    duration_tag = f"      <itunes:duration>{duration}</itunes:duration>\n"
+
+                season_tag = (
+                    f"      <itunes:season>{season_num}</itunes:season>\n"
+                    if has_seasons
+                    else ""
+                )
+
+                items.append(
+                    f"    <item>\n"
+                    f"      <title>{episode_title}</title>\n"
+                    f'      <enclosure url="{xe(url)}" length="{file_size}" type="{mime}"/>\n'
+                    f'      <guid isPermaLink="false">{guid}</guid>\n'
+                    f"      <pubDate>{pub_date}</pubDate>\n"
+                    f"      <itunes:title>{episode_title}</itunes:title>\n"
+                    f"      <itunes:episode>{ep_num}</itunes:episode>\n"
+                    f"{season_tag}"
+                    f"{duration_tag}"
+                    f"    </item>"
+                )
 
         # 封面标签
         image_block = ""
