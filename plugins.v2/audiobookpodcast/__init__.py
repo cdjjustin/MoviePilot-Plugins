@@ -111,7 +111,7 @@ class AudiobookPodcast(_PluginBase):
     # ---------- 插件元数据（必须与 package.v2.json 保持一致） ----------
     plugin_name = "有声书播客"
     plugin_desc = "扫描本地有声书目录，生成 iOS 播客（Apple Podcasts）兼容的 RSS 2.0 订阅源"
-    plugin_icon = "Podcast_A.png"
+    plugin_icon = "Audiobookshelf_A.png"
     plugin_version = "1.0.3"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"

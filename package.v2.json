@@ -4,7 +4,7 @@
         "description": "扫描本地有声书目录，生成 iOS 播客（Apple Podcasts）兼容的 RSS 2.0 订阅源",
         "labels": "有声书,播客,RSS,iTunes,Apple Podcasts",
         "version": "1.0.3",
-        "icon": "Podcast_A.png",
+        "icon": "Audiobookshelf_A.png",
         "author": "cdjjustin",
         "level": 1,
         "history": {
