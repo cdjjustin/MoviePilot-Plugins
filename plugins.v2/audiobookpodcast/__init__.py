@@ -654,7 +654,6 @@ class AudiobookPodcast(_PluginBase):
         self.post_message(
             title="📚 有声书播客 - 整理完成",
             text=text,
-            mtype=NotificationType.Manual,
         )
 
         logger.info(f"[AudiobookPodcast] 重新整理完成，共 {total} 本有声书")
