@@ -22,6 +22,7 @@ AudiobookPodcast – MoviePilot V2 插件
 """
 
 import hashlib
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -67,6 +68,11 @@ IMAGE_MIME: Dict[str, str] = {
 
 # 候选封面文件名（不含扩展名，小写）
 COVER_NAMES: frozenset = frozenset({"cover", "folder", "front", "artwork", "album", "thumbnail"})
+
+
+def _natural_key(s: str) -> list:
+    """自然排序 key：将字符串中连续数字段按整数值比较，避免"第10季"排在"第2季"前。"""
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", s)]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -165,7 +171,7 @@ class AudiobookPodcast(_PluginBase):
                 "path": "/scan",
                 "endpoint": self.api_scan,
                 "methods": ["GET"],
-                "auth": "apikey",
+                "auth": "bear",
                 "summary": "重新扫描有声书目录",
                 "description": "重新扫描目录并通过消息渠道推送整理结果",
             },
@@ -656,7 +662,7 @@ class AudiobookPodcast(_PluginBase):
         books: List[Dict[str, Any]] = []
 
         # 子目录 → 独立播客（递归收集音频，支持 CD1/CD2 子结构）
-        for item in sorted(base.iterdir()):
+        for item in sorted(base.iterdir(), key=lambda p: _natural_key(p.name)):
             if not item.is_dir():
                 continue
             audio_files = sorted(
@@ -665,7 +671,7 @@ class AudiobookPodcast(_PluginBase):
                     for f in item.rglob("*")
                     if f.is_file() and f.suffix.lower() in AUDIO_EXTENSIONS
                 ],
-                key=lambda f: f.relative_to(item),
+                key=lambda f: _natural_key(str(f.relative_to(item))),
             )
             if audio_files:
                 books.append(
@@ -786,8 +792,8 @@ class AudiobookPodcast(_PluginBase):
             key = rel_parts[0] if len(rel_parts) > 1 else ""
             season_buckets.setdefault(key, []).append(f)
 
-        # 按子目录名排序，保证季序稳定
-        sorted_seasons = sorted(season_buckets.keys())
+        # 按子目录名自然排序（数字段按整数值比较），保证第2季在第10季前
+        sorted_seasons = sorted(season_buckets.keys(), key=_natural_key)
         has_seasons = len(sorted_seasons) > 1 or (
             len(sorted_seasons) == 1 and sorted_seasons[0] != ""
         )
