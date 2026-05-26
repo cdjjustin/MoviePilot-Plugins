@@ -703,11 +703,20 @@ class AudiobookPodcast(_PluginBase):
 
     @staticmethod
     def _find_cover(directory: Path) -> Optional[str]:
-        """在目录中查找封面图片，返回文件名（相对于该目录）或 None。"""
+        """
+        查找封面图片，返回相对于 directory 的路径字符串或 None。
+        优先查书根目录；根目录无封面时递归查子目录（取排序后第一个命中）。
+        """
+        # 1. 先查根目录
         for f in directory.iterdir():
             if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS:
                 if f.stem.lower() in COVER_NAMES:
                     return f.name
+        # 2. 根目录无封面，递归查子目录
+        for f in sorted(directory.rglob("*")):
+            if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS:
+                if f.stem.lower() in COVER_NAMES:
+                    return str(f.relative_to(directory)).replace("\\", "/")
         return None
 
     def _resolve_file_path(self, book: str, file: str) -> Optional[Path]:
