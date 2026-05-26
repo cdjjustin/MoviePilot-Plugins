@@ -178,7 +178,7 @@ class AudiobookPodcast(_PluginBase):
                                             "model": "audiobook_path",
                                             "label": "有声书根目录",
                                             "placeholder": "/mnt/audiobooks",
-                                            "hint": "每个子目录视为一本书/一个播客节目；根目录下的音频归入"杂项"",
+                                            "hint": "每个子目录视为一本书/一个播客节目；根目录下的音频归入「杂项」",
                                             "persistent-hint": True,
                                         },
                                     }
