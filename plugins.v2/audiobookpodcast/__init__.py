@@ -100,6 +100,47 @@ def _natural_key(s: str) -> list:
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", normalized)]
 
 
+# 从文件名中提取季号（中文或阿拉伯）和集号（阿拉伯），例："039.第二季.第002集.xxx"
+_FNAME_SEASON_RE = re.compile(r'第([一二三四五六七八九十百千万]+|\d+)季')
+_FNAME_EPISODE_RE = re.compile(r'第0*(\d+)集')
+
+
+def _cn_to_int(cn_text: str) -> int:
+    """将中文数字字符串（支持一～九十九）或阿拉伯数字转换为整数，转换失败返回 0。"""
+    if cn_text.isdigit():
+        return int(cn_text)
+
+    def _cn_replace(m: re.Match) -> str:
+        t = m.group()
+        if t == "十":
+            return "10"
+        if t.startswith("十"):
+            return str(10 + _CN_DIGIT_MAP.get(t[1:], 0))
+        if "十" in t:
+            idx = t.index("十")
+            return str(_CN_DIGIT_MAP.get(t[:idx], 0) * 10 + _CN_DIGIT_MAP.get(t[idx + 1:], 0))
+        return str(_CN_DIGIT_MAP.get(t, 0))
+
+    normalized = _CN_NUM_RE.sub(_cn_replace, cn_text)
+    return int(normalized) if normalized.isdigit() else 0
+
+
+def _parse_season_ep_from_stem(stem: str) -> Tuple[Optional[int], Optional[int]]:
+    """
+    从文件名（不含扩展名）中解析季号和集号。
+    例："039.第二季.第002集.盗墓笔记 秦岭神树" → (2, 2)
+    无法匹配时返回 (None, None)。
+    """
+    season_m = _FNAME_SEASON_RE.search(stem)
+    ep_m = _FNAME_EPISODE_RE.search(stem)
+    if season_m and ep_m:
+        s = _cn_to_int(season_m.group(1))
+        e = int(ep_m.group(1))
+        if s > 0 and e > 0:
+            return s, e
+    return None, None
+
+
 # 匹配书名末尾的码率/格式标记，如 " 128kbps"、"[320K]"、"（FLAC）"、" - MP3" 等
 _NAME_JUNK_RE = re.compile(
     r"[\s\-_—\[【（(]+(?:\d+\s*k(?:bps?|b?)?|mp[34]|flac|aac|wav)[\s\]】）)]*$",
@@ -124,7 +165,7 @@ class AudiobookPodcast(_PluginBase):
     plugin_name = "有声书播客"
     plugin_desc = "扫描本地有声书目录，生成 iOS 播客（Apple Podcasts）兼容的 RSS 2.0 订阅源"
     plugin_icon = "Audiobookshelf_A.png"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookpodcast_"
@@ -871,9 +912,17 @@ class AudiobookPodcast(_PluginBase):
                 if duration:
                     duration_tag = f"      <itunes:duration>{duration}</itunes:duration>\n"
 
+                # 优先从文件名中解析季号/集号（扁平目录结构）；其次使用子目录派生值；最后降级为顺序编号
+                parsed_season, parsed_ep = _parse_season_ep_from_stem(f.stem)
+                actual_season: Optional[int] = (
+                    parsed_season if parsed_season is not None
+                    else (season_num if has_seasons else None)
+                )
+                actual_ep: int = parsed_ep if parsed_ep is not None else ep_num
+
                 season_tag = (
-                    f"      <itunes:season>{season_num}</itunes:season>\n"
-                    if has_seasons
+                    f"      <itunes:season>{actual_season}</itunes:season>\n"
+                    if actual_season is not None
                     else ""
                 )
 
@@ -884,7 +933,7 @@ class AudiobookPodcast(_PluginBase):
                     f'      <guid isPermaLink="false">{guid}</guid>\n'
                     f"      <pubDate>{pub_date}</pubDate>\n"
                     f"      <itunes:title>{episode_title}</itunes:title>\n"
-                    f"      <itunes:episode>{ep_num}</itunes:episode>\n"
+                    f"      <itunes:episode>{actual_ep}</itunes:episode>\n"
                     f"{season_tag}"
                     f"{duration_tag}"
                     f"    </item>"
