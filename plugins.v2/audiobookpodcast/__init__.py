@@ -165,7 +165,7 @@ class AudiobookPodcast(_PluginBase):
     plugin_name = "有声书播客"
     plugin_desc = "扫描本地有声书目录，生成 iOS 播客（Apple Podcasts）兼容的 RSS 2.0 订阅源"
     plugin_icon = "Audiobookshelf_A.png"
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookpodcast_"
@@ -606,6 +606,7 @@ class AudiobookPodcast(_PluginBase):
         """
         定时扫描：与上次快照对比，仅当文件大小在两个连续扫描周期内保持不变
         （认为下载已完成）时，才将其计入"新增内容"并推送通知。
+        只通知**全新书籍**（首次出现）；已有书籍新增集数不重复通知。
 
         持久化数据 key: "file_snapshot"
         结构: {
@@ -616,9 +617,10 @@ class AudiobookPodcast(_PluginBase):
         if not self._enabled or not self._audiobook_path:
             return
 
-        # ── 1. 构建当前快照 ──
+        # ── 1. 构建当前快照（同时保留 display_name 映射） ──
         books = self._scan_books()
         current: Dict[str, Dict[str, int]] = {}
+        display_map: Dict[str, str] = {}
         for book in books:
             snap: Dict[str, int] = {}
             for f in book["files"]:
@@ -628,13 +630,14 @@ class AudiobookPodcast(_PluginBase):
                 except OSError:
                     pass
             current[book["name"]] = snap
+            display_map[book["name"]] = book.get("display_name", book["name"])
 
         # ── 2. 加载历史快照 ──
         saved: Dict[str, Any] = self.get_data("file_snapshot") or {}
         prev: Dict[str, Dict[str, int]] = saved.get("prev", {})
         confirmed: Dict[str, Dict[str, int]] = saved.get("confirmed", {})
 
-        # ── 3. 找出本轮新稳定的书籍/集数 ──
+        # ── 3. 找出本轮首次出现且已稳定的新书籍 ──
         notify_lines: List[str] = []
         new_confirmed: Dict[str, Dict[str, int]] = {}
 
@@ -649,20 +652,10 @@ class AudiobookPodcast(_PluginBase):
                 if prev_files.get(path) == size
             }
 
-            # 新稳定文件 = 稳定但尚未通知过（或大小发生了变化，如替换）
-            newly_stable = {
-                path: size
-                for path, size in stable_files.items()
-                if conf_files.get(path) != size
-            }
-
-            if newly_stable:
-                is_new_book = book_name not in confirmed
-                count = len(newly_stable)
-                if is_new_book:
-                    notify_lines.append(f"• 新增《{book_name}》（{count} 集）")
-                else:
-                    notify_lines.append(f"• 《{book_name}》新增 {count} 集")
+            # 仅通知全新书籍（confirmed 中从未出现过），且该书至少有一个稳定文件
+            if stable_files and book_name not in confirmed:
+                display = display_map.get(book_name, book_name)
+                notify_lines.append(f"• 新增《{display}》（{len(cur_files)} 集）")
 
             # 更新 confirmed：合并已有 + 新稳定，移除已删除文件
             merged = {**conf_files, **{p: s for p, s in stable_files.items()}}
@@ -671,11 +664,11 @@ class AudiobookPodcast(_PluginBase):
         # ── 4. 推送通知 ──
         if notify_lines:
             self.post_message(
-                title="📚 有声书播客 - 检测到新内容",
+                title="📚 有声书播客 - 发现新有声书",
                 text="\n".join(notify_lines),
                 mtype=NotificationType.Manual,
             )
-            logger.info(f"[AudiobookPodcast] 监控通知：{notify_lines}")
+            logger.info(f"[AudiobookPodcast] 监控通知（新书）：{notify_lines}")
 
         # ── 5. 持久化快照 ──
         self.save_data(
