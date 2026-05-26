@@ -5,7 +5,7 @@
         "labels": "有声书,播客,RSS,iTunes,Apple Podcasts",
         "version": "1.0.0",
         "icon": "Podcast_A.png",
-        "author": "muju",
+        "author": "cdjjustin",
         "level": 1,
         "history": {
             "v1.0.0": "初始版本，支持目录扫描、RSS 生成、音频流式服务、封面图、时长标签"
