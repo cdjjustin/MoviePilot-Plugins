@@ -33,6 +33,7 @@ from fastapi.responses import FileResponse, Response
 from app.core.config import settings
 from app.log import logger
 from app.plugins import _PluginBase
+from app.schemas.types import NotificationType
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 常量
@@ -139,6 +140,14 @@ class AudiobookPodcast(_PluginBase):
                 "summary": "获取音频/封面文件",
                 "description": "流式返回音频或封面图片文件，支持 HTTP Range 请求",
             },
+            {
+                "path": "/scan",
+                "endpoint": self.api_scan,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "重新扫描有声书目录",
+                "description": "重新扫描目录并通过消息渠道推送整理结果",
+            },
         ]
 
     # ──────────────────────────── 配置表单 ────────────────────────────
@@ -148,7 +157,7 @@ class AudiobookPodcast(_PluginBase):
             {
                 "component": "VForm",
                 "content": [
-                    # ---- 启用开关 ----
+                    # ---- 启用开关 + 重新整理按钮 ----
                     {
                         "component": "VRow",
                         "content": [
@@ -161,7 +170,29 @@ class AudiobookPodcast(_PluginBase):
                                         "props": {"model": "enabled", "label": "启用插件"},
                                     }
                                 ],
-                            }
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VBtn",
+                                        "props": {
+                                            "variant": "tonal",
+                                            "color": "primary",
+                                            "prepend-icon": "mdi-refresh",
+                                            "block": True,
+                                        },
+                                        "events": {
+                                            "click": {
+                                                "api": "plugin/AudiobookPodcast/scan",
+                                                "method": "get",
+                                            }
+                                        },
+                                        "text": "重新整理",
+                                    }
+                                ],
+                            },
                         ],
                     },
                     # ---- 有声书根目录 ----
@@ -429,6 +460,39 @@ class AudiobookPodcast(_PluginBase):
 
     def stop_service(self) -> None:
         pass
+
+    # ──────────────────────────── API：重新整理 ────────────────────────────
+
+    def api_scan(self) -> dict:
+        """
+        重新扫描有声书目录，整理完成后通过系统消息渠道推送通知。
+        """
+        if not self._enabled:
+            raise HTTPException(status_code=503, detail="插件未启用")
+
+        books = self._scan_books()
+        total = len(books)
+
+        if books:
+            lines = [f"• {b['name']}（{b['count']} 集）" for b in books[:20]]
+            if total > 20:
+                lines.append(f"... 共 {total} 本")
+            detail = "\n".join(lines)
+            text = f"共找到 {total} 本有声书：\n{detail}"
+        else:
+            text = "未找到任何有声书，请检查目录配置。"
+
+        self.post_message(
+            title="📚 有声书播客 - 整理完成",
+            text=text,
+            mtype=NotificationType.Manual,
+        )
+
+        logger.info(f"[AudiobookPodcast] 重新整理完成，共 {total} 本有声书")
+        return {
+            "total": total,
+            "books": [{"name": b["name"], "count": b["count"]} for b in books],
+        }
 
     # ──────────────────────────── 内部：扫描目录 ────────────────────────────
 
