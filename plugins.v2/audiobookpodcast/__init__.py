@@ -94,6 +94,8 @@ class AudiobookPodcast(_PluginBase):
     _server_url: str = ""
     _podcast_author: str = "AudiobookPodcast"
     _podcast_image: str = ""
+    _monitor_enabled: bool = False
+    _monitor_interval: int = 30
 
     # ──────────────────────────── 生命周期 ────────────────────────────
 
@@ -104,12 +106,31 @@ class AudiobookPodcast(_PluginBase):
         self._server_url = (config.get("server_url") or "").strip().rstrip("/")
         self._podcast_author = (config.get("podcast_author") or "AudiobookPodcast").strip()
         self._podcast_image = (config.get("podcast_image") or "").strip()
+        self._monitor_enabled = bool(config.get("monitor_enabled", False))
+        try:
+            self._monitor_interval = max(5, int(config.get("monitor_interval") or 30))
+        except (ValueError, TypeError):
+            self._monitor_interval = 30
 
     def get_state(self) -> bool:
         return self._enabled and bool(self._audiobook_path) and bool(self._server_url)
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
+        return []
+
+    def get_service(self) -> List[Dict[str, Any]]:
+        """注册定时目录监控任务。"""
+        if self._enabled and self._monitor_enabled and self._audiobook_path:
+            return [
+                {
+                    "id": "AudiobookPodcastMonitor",
+                    "name": "有声书目录监控",
+                    "trigger": "interval",
+                    "func": self._scheduled_scan,
+                    "kwargs": {"minutes": self._monitor_interval},
+                }
+            ]
         return []
 
     # ──────────────────────────── API 注册 ────────────────────────────
@@ -190,6 +211,44 @@ class AudiobookPodcast(_PluginBase):
                                             }
                                         },
                                         "text": "重新整理",
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    # ---- 目录监控 ----
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "monitor_enabled",
+                                            "label": "启用目录监控",
+                                            "hint": "定期扫描新增内容并推送通知",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "monitor_interval",
+                                            "label": "扫描间隔（分钟）",
+                                            "type": "number",
+                                            "placeholder": "30",
+                                            "hint": "最小 5 分钟；建议 15〞60 分钟",
+                                            "persistent-hint": True,
+                                        },
                                     }
                                 ],
                             },
@@ -312,6 +371,8 @@ class AudiobookPodcast(_PluginBase):
             "server_url": "",
             "podcast_author": "AudiobookPodcast",
             "podcast_image": "",
+            "monitor_enabled": False,
+            "monitor_interval": 30,
         }
 
     # ──────────────────────────── 详情页 ────────────────────────────
@@ -460,6 +521,89 @@ class AudiobookPodcast(_PluginBase):
 
     def stop_service(self) -> None:
         pass
+
+    # ──────────────────────────── 定时监控 ────────────────────────────
+
+    def _scheduled_scan(self) -> None:
+        """
+        定时扫描：与上次快照对比，仅当文件大小在两个连续扫描周期内保持不变
+        （认为下载已完成）时，才将其计入"新增内容"并推送通知。
+
+        持久化数据 key: "file_snapshot"
+        结构: {
+            "prev":      {book_name: {rel_path: file_size}},  # 上次扫描结果
+            "confirmed": {book_name: {rel_path: file_size}},  # 已通知过的稳定文件
+        }
+        """
+        if not self._enabled or not self._audiobook_path:
+            return
+
+        # ── 1. 构建当前快照 ──
+        books = self._scan_books()
+        current: Dict[str, Dict[str, int]] = {}
+        for book in books:
+            snap: Dict[str, int] = {}
+            for f in book["files"]:
+                try:
+                    rel = str(f.relative_to(book["path"])).replace("\\", "/")
+                    snap[rel] = f.stat().st_size
+                except OSError:
+                    pass
+            current[book["name"]] = snap
+
+        # ── 2. 加载历史快照 ──
+        saved: Dict[str, Any] = self.get_data("file_snapshot") or {}
+        prev: Dict[str, Dict[str, int]] = saved.get("prev", {})
+        confirmed: Dict[str, Dict[str, int]] = saved.get("confirmed", {})
+
+        # ── 3. 找出本轮新稳定的书籍/集数 ──
+        notify_lines: List[str] = []
+        new_confirmed: Dict[str, Dict[str, int]] = {}
+
+        for book_name, cur_files in current.items():
+            prev_files = prev.get(book_name, {})
+            conf_files = confirmed.get(book_name, {})
+
+            # 稳定文件 = 当前大小与上次扫描一致（文件在整个间隔内未被写入）
+            stable_files = {
+                path: size
+                for path, size in cur_files.items()
+                if prev_files.get(path) == size
+            }
+
+            # 新稳定文件 = 稳定但尚未通知过（或大小发生了变化，如替换）
+            newly_stable = {
+                path: size
+                for path, size in stable_files.items()
+                if conf_files.get(path) != size
+            }
+
+            if newly_stable:
+                is_new_book = book_name not in confirmed
+                count = len(newly_stable)
+                if is_new_book:
+                    notify_lines.append(f"• 新增《{book_name}》（{count} 集）")
+                else:
+                    notify_lines.append(f"• 《{book_name}》新增 {count} 集")
+
+            # 更新 confirmed：合并已有 + 新稳定，移除已删除文件
+            merged = {**conf_files, **{p: s for p, s in stable_files.items()}}
+            new_confirmed[book_name] = {p: s for p, s in merged.items() if p in cur_files}
+
+        # ── 4. 推送通知 ──
+        if notify_lines:
+            self.post_message(
+                title="📚 有声书播客 - 检测到新内容",
+                text="\n".join(notify_lines),
+                mtype=NotificationType.Manual,
+            )
+            logger.info(f"[AudiobookPodcast] 监控通知：{notify_lines}")
+
+        # ── 5. 持久化快照 ──
+        self.save_data(
+            "file_snapshot",
+            {"prev": current, "confirmed": new_confirmed},
+        )
 
     # ──────────────────────────── API：重新整理 ────────────────────────────
 
