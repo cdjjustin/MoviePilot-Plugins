@@ -69,10 +69,35 @@ IMAGE_MIME: Dict[str, str] = {
 # 候选封面文件名（不含扩展名，小写）
 COVER_NAMES: frozenset = frozenset({"cover", "folder", "front", "artwork", "album", "thumbnail"})
 
+# 中文数字 → 阿拉伯数字（用于自然排序）
+_CN_DIGIT_MAP: Dict[str, int] = {
+    "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9,
+}
+# 匹配中文数字序列（一–九十九）
+_CN_NUM_RE = re.compile(
+    r"[一二三四五六七八九]?十[一二三四五六七八九]?|[一二三四五六七八九]"
+)
+
 
 def _natural_key(s: str) -> list:
-    """自然排序 key：将字符串中连续数字段按整数值比较，避免"第10季"排在"第2季"前。"""
-    return [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", s)]
+    """
+    自然排序 key：中文数字（一–九十九）与阿拉伯数字均按数值比较。
+    例：第一季 < 第二季 < … < 第七季 < 第十季 < 第十一季
+    """
+    def _cn_replace(m: re.Match) -> str:
+        t = m.group()
+        if t == "十":
+            return "10"
+        if t.startswith("十"):
+            return str(10 + _CN_DIGIT_MAP.get(t[1:], 0))
+        if "十" in t:
+            idx = t.index("十")
+            return str(_CN_DIGIT_MAP.get(t[:idx], 0) * 10 + _CN_DIGIT_MAP.get(t[idx + 1:], 0))
+        return str(_CN_DIGIT_MAP.get(t, 0))
+
+    normalized = _CN_NUM_RE.sub(_cn_replace, s)
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", normalized)]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -87,7 +112,7 @@ class AudiobookPodcast(_PluginBase):
     plugin_name = "有声书播客"
     plugin_desc = "扫描本地有声书目录，生成 iOS 播客（Apple Podcasts）兼容的 RSS 2.0 订阅源"
     plugin_icon = "Podcast_A.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookpodcast_"
