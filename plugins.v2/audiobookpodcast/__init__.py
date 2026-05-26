@@ -100,6 +100,18 @@ def _natural_key(s: str) -> list:
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", normalized)]
 
 
+# 匹配书名末尾的码率/格式标记，如 " 128kbps"、"[320K]"、"（FLAC）"、" - MP3" 等
+_NAME_JUNK_RE = re.compile(
+    r"[\s\-_—\[【（(]+(?:\d+\s*k(?:bps?|b?)?|mp[34]|flac|aac|wav)[\s\]】）)]*$",
+    re.IGNORECASE,
+)
+
+
+def _clean_book_name(name: str) -> str:
+    """去除书名末尾的码率/格式标记，返回干净的显示名称。"""
+    return _NAME_JUNK_RE.sub("", name).strip()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 插件主类
 # ──────────────────────────────────────────────────────────────────────────────
@@ -439,7 +451,7 @@ class AudiobookPodcast(_PluginBase):
                         {
                             "component": "td",
                             "props": {"style": "padding:8px 12px;vertical-align:top"},
-                            "text": book["name"],
+                            "text": book.get("display_name", book["name"]),
                         },
                         {
                             "component": "td",
@@ -643,8 +655,19 @@ class AudiobookPodcast(_PluginBase):
         total = len(books)
 
         if books:
-            lines = [f"• {b['name']}（{b['count']} 集）" for b in books[:20]]
-            if total > 20:
+            apikey = getattr(settings, "API_TOKEN", "")
+            lines = []
+            for b in books[:15]:
+                clean = b.get("display_name", b["name"])
+                line = f"• {clean}（{b['count']} 集）"
+                if self._server_url and apikey:
+                    feed_url = (
+                        f"{self._server_url}/api/v1/plugin/AudiobookPodcast/feed"
+                        f"?book={quote(b['name'])}&apikey={apikey}"
+                    )
+                    line += f"\n  {feed_url}"
+                lines.append(line)
+            if total > 15:
                 lines.append(f"... 共 {total} 本")
             detail = "\n".join(lines)
             text = f"共找到 {total} 本有声书：\n{detail}"
@@ -695,6 +718,7 @@ class AudiobookPodcast(_PluginBase):
                 books.append(
                     {
                         "name": item.name,
+                        "display_name": _clean_book_name(item.name),
                         "path": item,
                         "files": audio_files,
                         "count": len(audio_files),
@@ -776,6 +800,7 @@ class AudiobookPodcast(_PluginBase):
         from xml.sax.saxutils import escape as xe
 
         name: str = book["name"]
+        display_name: str = book.get("display_name", name)
         files: List[Path] = book["files"]
         book_path: Path = book["path"]
         cover: Optional[str] = book.get("cover")
@@ -872,7 +897,7 @@ class AudiobookPodcast(_PluginBase):
                 f'    <itunes:image href="{xe(cover_url)}"/>\n'
                 f"    <image>\n"
                 f"      <url>{xe(cover_url)}</url>\n"
-                f"      <title>{xe(name)}</title>\n"
+                f"      <title>{xe(display_name)}</title>\n"
                 f"      <link>{xe(self._server_url)}</link>\n"
                 f"    </image>\n"
             )
@@ -888,9 +913,9 @@ class AudiobookPodcast(_PluginBase):
             '     xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"\n'
             '     xmlns:content="http://purl.org/rss/1.0/modules/content/">\n'
             "  <channel>\n"
-            f"    <title>{xe(name)}</title>\n"
+            f"    <title>{xe(display_name)}</title>\n"
             f"    <link>{xe(channel_link)}</link>\n"
-            f"    <description>{xe(name)}</description>\n"
+            f"    <description>{xe(display_name)}</description>\n"
             "    <language>zh-cn</language>\n"
             f"    <itunes:author>{xe(self._podcast_author)}</itunes:author>\n"
             '    <itunes:category text="Arts"/>\n'
