@@ -1,0 +1,3 @@
+# 用于读取音频时长（itunes:duration 标签）
+# MoviePilot 共享 Python 环境；若已有 mutagen 可跳过
+mutagen>=1.47.0
