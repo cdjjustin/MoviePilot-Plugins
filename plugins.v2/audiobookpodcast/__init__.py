@@ -259,7 +259,7 @@ class AudiobookPodcast(_PluginBase):
                                             "variant": "tonal",
                                             "title": "如何在 iOS 播客 App 中订阅",
                                             "text": (
-                                                "打开"播客"App → 搜索 → 右上角通过 URL 收听，"
+                                                "打开\"播客\"App → 搜索 → 右上角通过 URL 收听，"
                                                 "粘贴订阅地址即可。\n\n"
                                                 "订阅地址格式：\n"
                                                 "{服务器地址}/api/v1/plugin/AudiobookPodcast/feed"
