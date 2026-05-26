@@ -209,7 +209,7 @@ class AudiobookPodcast(_PluginBase):
             {
                 "component": "VForm",
                 "content": [
-                    # ---- 启用开关 + 重新整理按钮 ----
+                    # ---- 启用开关 ----
                     {
                         "component": "VRow",
                         "content": [
@@ -220,28 +220,6 @@ class AudiobookPodcast(_PluginBase):
                                     {
                                         "component": "VSwitch",
                                         "props": {"model": "enabled", "label": "启用插件"},
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VBtn",
-                                        "props": {
-                                            "variant": "tonal",
-                                            "color": "primary",
-                                            "prepend-icon": "mdi-refresh",
-                                            "block": True,
-                                        },
-                                        "events": {
-                                            "click": {
-                                                "api": "plugin/AudiobookPodcast/scan",
-                                                "method": "get",
-                                            }
-                                        },
-                                        "text": "重新整理",
                                     }
                                 ],
                             },
@@ -485,6 +463,22 @@ class AudiobookPodcast(_PluginBase):
             )
 
         return [
+            {
+                "component": "VBtn",
+                "props": {
+                    "variant": "tonal",
+                    "color": "primary",
+                    "prepend-icon": "mdi-refresh",
+                    "class": "mb-4",
+                },
+                "events": {
+                    "click": {
+                        "api": "plugin/AudiobookPodcast/scan",
+                        "method": "get",
+                    }
+                },
+                "text": "重新整理",
+            },
             {
                 "component": "VAlert",
                 "props": {
