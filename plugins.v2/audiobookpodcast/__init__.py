@@ -23,13 +23,14 @@ AudiobookPodcast – MoviePilot V2 插件
 
 import hashlib
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
-from fastapi import HTTPException
-from fastapi.responses import FileResponse, Response
+from fastapi import HTTPException, Request
+from fastapi.responses import Response, StreamingResponse
 
 from app.core.config import settings
 from app.log import logger
@@ -165,7 +166,7 @@ class AudiobookPodcast(_PluginBase):
     plugin_name = "有声书播客"
     plugin_desc = "扫描本地有声书目录，生成 iOS 播客（Apple Podcasts）兼容的 RSS 2.0 订阅源"
     plugin_icon = "Audiobookshelf_A.png"
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookpodcast_"
@@ -180,6 +181,8 @@ class AudiobookPodcast(_PluginBase):
     _podcast_image: str = ""
     _monitor_enabled: bool = False
     _monitor_interval: int = 30
+    # 过滤最近修改的音频文件（防止边下载/拷贝边被 RSS 引用导致偶发解码失败）
+    _stable_wait_seconds: int = 60
 
     # ──────────────────────────── 生命周期 ────────────────────────────
 
@@ -191,6 +194,10 @@ class AudiobookPodcast(_PluginBase):
         self._podcast_author = (config.get("podcast_author") or "AudiobookPodcast").strip()
         self._podcast_image = (config.get("podcast_image") or "").strip()
         self._monitor_enabled = bool(config.get("monitor_enabled", False))
+        try:
+            self._stable_wait_seconds = max(0, int(config.get("stable_wait_seconds") or 60))
+        except (ValueError, TypeError):
+            self._stable_wait_seconds = 60
         try:
             self._monitor_interval = max(5, int(config.get("monitor_interval") or 30))
         except (ValueError, TypeError):
@@ -309,6 +316,29 @@ class AudiobookPodcast(_PluginBase):
                                             "type": "number",
                                             "placeholder": "30",
                                             "hint": "最小 5 分钟；建议 15〞60 分钟",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    # ---- 文件稳定等待（防边下载边播放）----
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "stable_wait_seconds",
+                                            "label": "文件稳定等待（秒）",
+                                            "type": "number",
+                                            "placeholder": "60",
+                                            "hint": "过滤最近修改的音频，避免下载未完成导致偶发播放失败；0 表示不过滤",
                                             "persistent-hint": True,
                                         },
                                     }
@@ -435,6 +465,7 @@ class AudiobookPodcast(_PluginBase):
             "podcast_image": "",
             "monitor_enabled": False,
             "monitor_interval": 30,
+            "stable_wait_seconds": 60,
         }
 
     # ──────────────────────────── 详情页 ────────────────────────────
@@ -721,6 +752,17 @@ class AudiobookPodcast(_PluginBase):
 
     # ──────────────────────────── 内部：扫描目录 ────────────────────────────
 
+    def _is_file_stable(self, p: Path, now: float) -> bool:
+        """
+        文件稳定性过滤：避免 iOS 播客在文件仍处于写入/拷贝阶段时拉取导致偶发解码失败。
+        """
+        if self._stable_wait_seconds <= 0:
+            return True
+        try:
+            return (now - p.stat().st_mtime) >= self._stable_wait_seconds
+        except OSError:
+            return False
+
     def _scan_books(self) -> List[Dict[str, Any]]:
         """
         扫描有声书根目录，返回书籍信息列表。
@@ -735,6 +777,7 @@ class AudiobookPodcast(_PluginBase):
             return []
 
         books: List[Dict[str, Any]] = []
+        now = time.time()
 
         # 子目录 → 独立播客（递归收集音频，支持 CD1/CD2 子结构）
         for item in sorted(base.iterdir(), key=lambda p: _natural_key(p.name)):
@@ -744,7 +787,9 @@ class AudiobookPodcast(_PluginBase):
                 [
                     f
                     for f in item.rglob("*")
-                    if f.is_file() and f.suffix.lower() in AUDIO_EXTENSIONS
+                    if f.is_file()
+                    and f.suffix.lower() in AUDIO_EXTENSIONS
+                    and self._is_file_stable(f, now)
                 ],
                 key=lambda f: _natural_key(str(f.relative_to(item))),
             )
@@ -765,7 +810,9 @@ class AudiobookPodcast(_PluginBase):
             [
                 f
                 for f in base.iterdir()
-                if f.is_file() and f.suffix.lower() in AUDIO_EXTENSIONS
+                if f.is_file()
+                and f.suffix.lower() in AUDIO_EXTENSIONS
+                and self._is_file_stable(f, now)
             ],
             key=lambda f: f.name,
         )
@@ -1033,7 +1080,7 @@ class AudiobookPodcast(_PluginBase):
             media_type="application/rss+xml; charset=utf-8",
         )
 
-    def api_serve_audio(self, book: str = "", file: str = "") -> FileResponse:
+    def api_serve_audio(self, request: Request, book: str = "", file: str = "") -> Response:
         """
         提供音频文件或封面图片的流式访问，支持 HTTP Range 请求（断点续播）。
 
@@ -1057,4 +1104,88 @@ class AudiobookPodcast(_PluginBase):
             raise HTTPException(status_code=403, detail="不支持的文件类型")
 
         media_type = MIME_TYPES.get(ext) or IMAGE_MIME.get(ext, "application/octet-stream")
-        return FileResponse(path=str(target), media_type=media_type, filename=target.name)
+
+        file_size = target.stat().st_size
+        base_headers = {
+            # iOS 播客在拖拽进度条/续播时通常会依赖 Accept-Ranges
+            "Accept-Ranges": "bytes",
+            # 避免客户端缓存“旧长度/旧片段”导致偶发解码失败
+            "Cache-Control": "no-store",
+        }
+
+        def _iter_file_range(path: Path, start: int, end: int):
+            chunk_size = 256 * 1024  # 256KB
+            with open(path, "rb") as f:
+                f.seek(start)
+                remaining = (end - start + 1)
+                while remaining > 0:
+                    read_size = min(chunk_size, remaining)
+                    data = f.read(read_size)
+                    if not data:
+                        break
+                    yield data
+                    remaining -= len(data)
+
+        range_header = request.headers.get("range", "")
+        if range_header.lower().startswith("bytes=") and file_size > 0:
+            # 仅取第一个 range（多 range 很少见）
+            raw = range_header.split("=", 1)[1].strip()
+            if "," in raw:
+                raw = raw.split(",", 1)[0].strip()
+
+            start_str, end_str = (raw.split("-", 1) + [""])[:2]
+            try:
+                if start_str.strip() == "":
+                    # bytes=-N
+                    suffix_len = int(end_str.strip() or "0")
+                    if suffix_len <= 0:
+                        return Response(
+                            status_code=416,
+                            headers={**base_headers, "Content-Range": f"bytes */{file_size}"},
+                        )
+                    start = max(file_size - suffix_len, 0)
+                    end = file_size - 1
+                elif end_str.strip() == "":
+                    # bytes=N-
+                    start = int(start_str.strip())
+                    end = file_size - 1
+                else:
+                    # bytes=N-M
+                    start = int(start_str.strip())
+                    end = int(end_str.strip())
+
+                # start 超出文件长度：返回 416
+                if start < 0 or start >= file_size or end < start:
+                    return Response(
+                        status_code=416,
+                        headers={**base_headers, "Content-Range": f"bytes */{file_size}"},
+                    )
+
+                end = min(end, file_size - 1)
+                content_length = end - start + 1
+                content_range = f"bytes {start}-{end}/{file_size}"
+
+                return StreamingResponse(
+                    _iter_file_range(target, start, end),
+                    media_type=media_type,
+                    status_code=206,
+                    headers={
+                        **base_headers,
+                        "Content-Range": content_range,
+                        "Content-Length": str(content_length),
+                    },
+                )
+            except ValueError:
+                # range 头格式异常：兜底返回整文件
+                pass
+
+        # 非 Range 请求：返回整文件（也带 Accept-Ranges / no-store）
+        if file_size <= 0:
+            return Response(status_code=200, media_type=media_type, headers=base_headers)
+
+        return StreamingResponse(
+            _iter_file_range(target, 0, file_size - 1),
+            media_type=media_type,
+            status_code=200,
+            headers={**base_headers, "Content-Length": str(file_size)},
+        )
