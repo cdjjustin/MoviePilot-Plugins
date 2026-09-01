@@ -16,7 +16,10 @@
 | 路径安全 | 路径归一化 + `relative_to` 检查，防目录遍历 |
 | API 鉴权 | 使用 MoviePilot API Token（apikey 模式） |
 
-> **升级 MoviePilot 后无法播放：** iOS 提示「无法在此设备上播放此单集」通常是 enclosure 的 HEAD/Range/MIME 不符合 Apple 要求，或 `API_TOKEN` 被重新生成导致订阅地址里的 `apikey` 失效。请更新到本插件 1.0.7+，并在插件详情页重新复制订阅地址。
+> **升级 MoviePilot 后无法播放 / 日志出现 401：**  
+> 1. 更新到本插件 **1.0.8+**（正确 apikey 仍 401 多半是宿主 V3 鉴权附带身份校验导致）。  
+> 2. 到 MoviePilot **设定 → 安全** 核对当前 `API_TOKEN`，再到插件详情页**重新复制订阅地址**（升级后 token 可能被重生成）。  
+> 3. 在播客 App 中取消旧订阅后重新添加。
 
 ---
 
