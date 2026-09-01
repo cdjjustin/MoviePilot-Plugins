@@ -30,12 +30,19 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 from fastapi import HTTPException, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response
 
-from app.core.config import settings
-from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import NotificationType
+
+try:
+    from app.sdk.config import settings
+    from app.sdk.logging import logger
+except ImportError:  # MoviePilot V2 兼容导入
+    from app.core.config import settings
+    from app.log import logger
+
+from .media_http import APPLE_AUDIO_MIME, media_type_for, serve_media_file
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 常量
@@ -45,27 +52,7 @@ AUDIO_EXTENSIONS: frozenset = frozenset(
     {".mp3", ".m4a", ".m4b", ".aac", ".ogg", ".flac", ".wav", ".opus", ".wma", ".aiff", ".mp4"}
 )
 
-MIME_TYPES: Dict[str, str] = {
-    ".mp3": "audio/mpeg",
-    ".m4a": "audio/mp4",
-    ".m4b": "audio/mp4",
-    ".mp4": "audio/mp4",
-    ".aac": "audio/aac",
-    ".ogg": "audio/ogg",
-    ".flac": "audio/flac",
-    ".wav": "audio/wav",
-    ".opus": "audio/ogg; codecs=opus",
-    ".wma": "audio/x-ms-wma",
-    ".aiff": "audio/aiff",
-}
-
 IMAGE_EXTENSIONS: frozenset = frozenset({".jpg", ".jpeg", ".png", ".webp"})
-IMAGE_MIME: Dict[str, str] = {
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-    ".webp": "image/webp",
-}
 
 # 候选封面文件名（不含扩展名，小写）
 COVER_NAMES: frozenset = frozenset({"cover", "folder", "front", "artwork", "album", "thumbnail"})
@@ -166,7 +153,7 @@ class AudiobookPodcast(_PluginBase):
     plugin_name = "有声书播客"
     plugin_desc = "扫描本地有声书目录，生成 iOS 播客（Apple Podcasts）兼容的 RSS 2.0 订阅源"
     plugin_icon = "Audiobookshelf_A.png"
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookpodcast_"
@@ -226,7 +213,23 @@ class AudiobookPodcast(_PluginBase):
 
     # ──────────────────────────── API 注册 ────────────────────────────
 
+    def _plugin_id(self) -> str:
+        """运行实例 ID（虚拟分身时为分身类名）。"""
+        return self.__class__.__name__
+
+    def _plugin_api_url(self, path: str, **query: str) -> str:
+        """构建当前实例的外部插件 API URL（query 值做百分号编码）。"""
+        parts = [
+            f"{k}={quote(str(v), safe='')}"
+            for k, v in query.items()
+            if v is not None
+        ]
+        base = f"{self._server_url}/api/v1/plugin/{self._plugin_id()}{path}"
+        return f"{base}?{'&'.join(parts)}" if parts else base
+
     def get_api(self) -> List[Dict[str, Any]]:
+        # feed / audio 必须声明原生响应：Apple 播客按 RSS/音频字节消费，不能套 JSON envelope。
+        # HEAD 是 Apple Podcasts 拉 enclosure 前的探测请求，缺了会提示无法播放。
         return [
             {
                 "path": "/books",
@@ -239,18 +242,44 @@ class AudiobookPodcast(_PluginBase):
             {
                 "path": "/feed",
                 "endpoint": self.api_get_feed,
-                "methods": ["GET"],
+                "methods": ["GET", "HEAD"],
                 "auth": "apikey",
                 "summary": "获取有声书 RSS 订阅源",
                 "description": "返回指定有声书的 RSS 2.0 XML（兼容 Apple Podcasts / iOS 播客）",
+                "response_model": None,
+                "response_class": Response,
+                "responses": {
+                    200: {
+                        "content": {
+                            "application/rss+xml": {"schema": {"type": "string"}},
+                        }
+                    }
+                },
             },
             {
                 "path": "/audio",
                 "endpoint": self.api_serve_audio,
-                "methods": ["GET"],
+                "methods": ["GET", "HEAD"],
                 "auth": "apikey",
                 "summary": "获取音频/封面文件",
-                "description": "流式返回音频或封面图片文件，支持 HTTP Range 请求",
+                "description": "返回音频或封面图片，支持 HTTP HEAD 与 Range 分片",
+                "response_model": None,
+                "response_class": FileResponse,
+                "responses": {
+                    200: {
+                        "content": {
+                            "audio/mpeg": {"schema": {"type": "string", "format": "binary"}},
+                            "audio/x-m4a": {"schema": {"type": "string", "format": "binary"}},
+                            "image/jpeg": {"schema": {"type": "string", "format": "binary"}},
+                        }
+                    },
+                    206: {
+                        "description": "Partial Content",
+                        "content": {
+                            "audio/mpeg": {"schema": {"type": "string", "format": "binary"}},
+                        },
+                    },
+                },
             },
             {
                 "path": "/scan",
@@ -512,9 +541,8 @@ class AudiobookPodcast(_PluginBase):
 
         rows = []
         for book in books:
-            feed_url = (
-                f"{self._server_url}/api/v1/plugin/AudiobookPodcast/feed"
-                f"?book={quote(book['name'])}&apikey={apikey}"
+            feed_url = self._plugin_api_url(
+                "/feed", book=book["name"], apikey=apikey
             )
             rows.append(
                 {
@@ -557,7 +585,7 @@ class AudiobookPodcast(_PluginBase):
                 },
                 "events": {
                     "click": {
-                        "api": "plugin/AudiobookPodcast/scan",
+                        "api": f"plugin/{self._plugin_id()}/scan",
                         "method": "get",
                     }
                 },
@@ -726,9 +754,8 @@ class AudiobookPodcast(_PluginBase):
                 clean = b.get("display_name", b["name"])
                 line = f"• {clean}（{b['count']} 集）"
                 if self._server_url and apikey:
-                    feed_url = (
-                        f"{self._server_url}/api/v1/plugin/AudiobookPodcast/feed"
-                        f"?book={quote(b['name'])}&apikey={apikey}"
+                    feed_url = self._plugin_api_url(
+                        "/feed", book=b["name"], apikey=apikey
                     )
                     line += f"\n  {feed_url}"
                 lines.append(line)
@@ -893,15 +920,18 @@ class AudiobookPodcast(_PluginBase):
             rel = f.relative_to(book_path)
             rel_str = str(rel).replace("\\", "/")
             return (
-                f"{self._server_url}/api/v1/plugin/AudiobookPodcast/audio"
-                f"?book={quote(name)}&file={quote(rel_str)}&apikey={apikey}"
+                self._plugin_api_url(
+                    "/audio",
+                    book=name,
+                    file=rel_str,
+                    apikey=apikey,
+                )
             )
 
         # 封面 URL
         if cover:
-            cover_url = (
-                f"{self._server_url}/api/v1/plugin/AudiobookPodcast/audio"
-                f"?book={quote(name)}&file={quote(cover)}&apikey={apikey}"
+            cover_url = self._plugin_api_url(
+                "/audio", book=name, file=cover, apikey=apikey
             )
         elif self._podcast_image:
             cover_url = self._podcast_image
@@ -935,7 +965,7 @@ class AudiobookPodcast(_PluginBase):
                     logger.warning(f"[AudiobookPodcast] 无法读取文件信息：{f}")
                     continue
 
-                mime = MIME_TYPES.get(f.suffix.lower(), "audio/mpeg")
+                mime = media_type_for(f)
                 url = _audio_url(f)
                 guid = hashlib.sha1(f"{name}/{f.relative_to(book_path)}".encode()).hexdigest()
                 pub_date = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
@@ -991,10 +1021,7 @@ class AudiobookPodcast(_PluginBase):
                 f"    </image>\n"
             )
 
-        channel_link = (
-            f"{self._server_url}/api/v1/plugin/AudiobookPodcast/feed"
-            f"?book={quote(name)}&apikey={apikey}"
-        )
+        channel_link = self._plugin_api_url("/feed", book=name, apikey=apikey)
 
         rss = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -1009,6 +1036,7 @@ class AudiobookPodcast(_PluginBase):
             f"    <itunes:author>{xe(self._podcast_author)}</itunes:author>\n"
             '    <itunes:category text="Arts"/>\n'
             "    <itunes:explicit>no</itunes:explicit>\n"
+            "    <itunes:block>no</itunes:block>\n"
             "    <itunes:type>serial</itunes:type>\n"
             f"{image_block}"
             + "\n".join(items)
@@ -1046,10 +1074,7 @@ class AudiobookPodcast(_PluginBase):
         books = self._scan_books()
         result = []
         for b in books:
-            feed_url = (
-                f"{self._server_url}/api/v1/plugin/AudiobookPodcast/feed"
-                f"?book={quote(b['name'])}&apikey={apikey}"
-            )
+            feed_url = self._plugin_api_url("/feed", book=b["name"], apikey=apikey)
             result.append(
                 {
                     "name": b["name"],
@@ -1082,18 +1107,14 @@ class AudiobookPodcast(_PluginBase):
 
     def api_serve_audio(self, request: Request, book: str = "", file: str = "") -> Response:
         """
-        提供音频文件或封面图片的流式访问，支持 HTTP Range 请求（断点续播）。
-
-        查询参数：
-          book  – 书名（对应根目录下的子目录名，根目录散装文件使用"杂项"）
-          file  – 文件相对于 book 目录的路径（支持子目录，如 CD1/第01集.mp3）
+        提供音频或封面访问。Apple 播客会先发 HEAD 再发 Range GET；
+        由 FileResponse 处理分片，避免 chunked 传输导致 iOS 无法播放。
         """
         if not self._enabled:
             raise HTTPException(status_code=503, detail="插件未启用")
         if not book or not file:
             raise HTTPException(status_code=400, detail="缺少 book 或 file 参数")
 
-        # 路径解析与安全验证
         target = self._resolve_file_path(book, file)
         if target is None:
             raise HTTPException(status_code=404, detail="文件不存在或路径非法")
@@ -1103,89 +1124,4 @@ class AudiobookPodcast(_PluginBase):
         if ext not in allowed:
             raise HTTPException(status_code=403, detail="不支持的文件类型")
 
-        media_type = MIME_TYPES.get(ext) or IMAGE_MIME.get(ext, "application/octet-stream")
-
-        file_size = target.stat().st_size
-        base_headers = {
-            # iOS 播客在拖拽进度条/续播时通常会依赖 Accept-Ranges
-            "Accept-Ranges": "bytes",
-            # 避免客户端缓存“旧长度/旧片段”导致偶发解码失败
-            "Cache-Control": "no-store",
-        }
-
-        def _iter_file_range(path: Path, start: int, end: int):
-            chunk_size = 256 * 1024  # 256KB
-            with open(path, "rb") as f:
-                f.seek(start)
-                remaining = (end - start + 1)
-                while remaining > 0:
-                    read_size = min(chunk_size, remaining)
-                    data = f.read(read_size)
-                    if not data:
-                        break
-                    yield data
-                    remaining -= len(data)
-
-        range_header = request.headers.get("range", "")
-        if range_header.lower().startswith("bytes=") and file_size > 0:
-            # 仅取第一个 range（多 range 很少见）
-            raw = range_header.split("=", 1)[1].strip()
-            if "," in raw:
-                raw = raw.split(",", 1)[0].strip()
-
-            start_str, end_str = (raw.split("-", 1) + [""])[:2]
-            try:
-                if start_str.strip() == "":
-                    # bytes=-N
-                    suffix_len = int(end_str.strip() or "0")
-                    if suffix_len <= 0:
-                        return Response(
-                            status_code=416,
-                            headers={**base_headers, "Content-Range": f"bytes */{file_size}"},
-                        )
-                    start = max(file_size - suffix_len, 0)
-                    end = file_size - 1
-                elif end_str.strip() == "":
-                    # bytes=N-
-                    start = int(start_str.strip())
-                    end = file_size - 1
-                else:
-                    # bytes=N-M
-                    start = int(start_str.strip())
-                    end = int(end_str.strip())
-
-                # start 超出文件长度：返回 416
-                if start < 0 or start >= file_size or end < start:
-                    return Response(
-                        status_code=416,
-                        headers={**base_headers, "Content-Range": f"bytes */{file_size}"},
-                    )
-
-                end = min(end, file_size - 1)
-                content_length = end - start + 1
-                content_range = f"bytes {start}-{end}/{file_size}"
-
-                return StreamingResponse(
-                    _iter_file_range(target, start, end),
-                    media_type=media_type,
-                    status_code=206,
-                    headers={
-                        **base_headers,
-                        "Content-Range": content_range,
-                        "Content-Length": str(content_length),
-                    },
-                )
-            except ValueError:
-                # range 头格式异常：兜底返回整文件
-                pass
-
-        # 非 Range 请求：返回整文件（也带 Accept-Ranges / no-store）
-        if file_size <= 0:
-            return Response(status_code=200, media_type=media_type, headers=base_headers)
-
-        return StreamingResponse(
-            _iter_file_range(target, 0, file_size - 1),
-            media_type=media_type,
-            status_code=200,
-            headers={**base_headers, "Content-Length": str(file_size)},
-        )
+        return serve_media_file(target, media_type_for(target))
