@@ -42,6 +42,12 @@ MONITOR_MODE_OPTIONS = [
     {"title": "高置信度自动整理", "value": "auto"},
 ]
 
+ORGANIZE_MODE_OPTIONS = [
+    {"title": "硬链接（推荐，不影响做种）", "value": "hardlink"},
+    {"title": "复制（保留源文件，写入标签）", "value": "copy"},
+    {"title": "移动/重命名（原地整理）", "value": "move"},
+]
+
 
 class AudiobookOrganizer(_PluginBase):
     """有声书刮削整理插件。"""
@@ -49,7 +55,7 @@ class AudiobookOrganizer(_PluginBase):
     plugin_name = "有声书刮削整理"
     plugin_desc = "从豆瓣/喜马拉雅刮削元数据，批量整理有声书文件（重命名、目录、标签、封面）"
     plugin_icon = "Audiobookshelf_A.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookorganizer_"
@@ -66,6 +72,7 @@ class AudiobookOrganizer(_PluginBase):
     _monitor_enabled: bool = False
     _monitor_interval: int = 60
     _monitor_mode: str = "notify"
+    _organize_mode: str = "hardlink"
     _confidence_threshold: float = 0.85
 
     # 运行时缓存
@@ -85,6 +92,7 @@ class AudiobookOrganizer(_PluginBase):
         self._ximalaya_cookie = (config.get("ximalaya_cookie") or "").strip()
         self._monitor_enabled = bool(config.get("monitor_enabled", False))
         self._monitor_mode = (config.get("monitor_mode") or "notify").strip()
+        self._organize_mode = (config.get("organize_mode") or "hardlink").strip()
         try:
             self._monitor_interval = max(5, int(config.get("monitor_interval") or 60))
         except (ValueError, TypeError):
@@ -214,6 +222,7 @@ class AudiobookOrganizer(_PluginBase):
             source_root=source_root,
             target_root=target_root,
             template=self._naming_template,
+            organize_mode=self._organize_mode,
         )
         self._plans_cache[plan.plan_id] = plan
         return plan.to_dict()
@@ -240,6 +249,7 @@ class AudiobookOrganizer(_PluginBase):
                 plan,
                 target_root=target_root,
                 cover_url=plan.metadata.cover_url,
+                organize_mode=self._organize_mode,
             )
             all_results["applied"].append({"plan_id": plan_id, "book": plan.book_name, "result": result})
             self._append_history(plan, result)
@@ -302,6 +312,22 @@ class AudiobookOrganizer(_PluginBase):
                                             "label": "整理输出目录",
                                             "placeholder": "留空则与源目录相同",
                                             "hint": "整理后的文件存放位置",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSelect",
+                                        "props": {
+                                            "model": "organize_mode",
+                                            "label": "整理方式",
+                                            "items": ORGANIZE_MODE_OPTIONS,
+                                            "hint": "硬链接：源文件不动，适合做种目录；复制：独立副本可写标签",
                                             "persistent-hint": True,
                                         },
                                     }
@@ -445,6 +471,7 @@ class AudiobookOrganizer(_PluginBase):
             "enabled": False,
             "source_path": "",
             "target_path": "",
+            "organize_mode": "hardlink",
             "naming_template": DEFAULT_TEMPLATE,
             "source_priority": "ximalaya_first",
             "douban_cookie": "",
@@ -606,11 +633,13 @@ class AudiobookOrganizer(_PluginBase):
                     source_root=Path(self._source_path),
                     target_root=Path(self._target_path or self._source_path),
                     template=self._naming_template,
+                    organize_mode=self._organize_mode,
                 )
                 result = apply_plan(
                     plan,
                     target_root=Path(self._target_path or self._source_path),
                     cover_url=metadata.cover_url,
+                    organize_mode=self._organize_mode,
                 )
                 self._append_history(plan, result)
                 auto_applied.append(f"• 《{book.name}》（置信度 {confidence:.0%}）")
