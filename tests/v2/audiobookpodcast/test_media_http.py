@@ -12,6 +12,7 @@ sys.path.insert(0, str(PLUGIN_DIR))
 
 from media_http import (  # noqa: E402
     APPLE_AUDIO_MIME,
+    check_apikey,
     media_headers,
     media_type_for,
     serve_media_file,
@@ -78,10 +79,23 @@ def test_range_request_returns_206(client: TestClient, mp3_file: Path):
     assert response.headers["content-length"] == "100"
 
 
+def test_check_apikey_accepts_matching_token():
+    assert check_apikey("2kYfiDOEwe4SolNvxVezeQ", "2kYfiDOEwe4SolNvxVezeQ")
+    assert check_apikey("  abc  ", "abc")
+
+
+def test_check_apikey_rejects_mismatch_or_empty():
+    assert not check_apikey("wrong", "2kYfiDOEwe4SolNvxVezeQ")
+    assert not check_apikey("", "2kYfiDOEwe4SolNvxVezeQ")
+    assert not check_apikey("2kYfiDOEwe4SolNvxVezeQ", "")
+    assert not check_apikey(None, "x")
+
+
 def test_plugin_api_declares_native_head_routes():
     source = (PLUGIN_DIR / "__init__.py").read_text(encoding="utf-8")
     assert '"methods": ["GET", "HEAD"]' in source
     assert '"response_model": None' in source
     assert "response_class" in source
-    assert 'plugin_version = "1.0.7"' in source
+    assert '"allow_anonymous": True' in source
+    assert 'plugin_version = "1.0.8"' in source
 

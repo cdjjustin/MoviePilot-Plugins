@@ -42,7 +42,7 @@ except ImportError:  # MoviePilot V2 兼容导入
     from app.core.config import settings
     from app.log import logger
 
-from .media_http import APPLE_AUDIO_MIME, media_type_for, serve_media_file
+from .media_http import APPLE_AUDIO_MIME, check_apikey, media_type_for, serve_media_file
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 常量
@@ -153,7 +153,7 @@ class AudiobookPodcast(_PluginBase):
     plugin_name = "有声书播客"
     plugin_desc = "扫描本地有声书目录，生成 iOS 播客（Apple Podcasts）兼容的 RSS 2.0 订阅源"
     plugin_icon = "Audiobookshelf_A.png"
-    plugin_version = "1.0.7"
+    plugin_version = "1.0.8"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookpodcast_"
@@ -227,15 +227,42 @@ class AudiobookPodcast(_PluginBase):
         base = f"{self._server_url}/api/v1/plugin/{self._plugin_id()}{path}"
         return f"{base}?{'&'.join(parts)}" if parts else base
 
+    def _require_apikey(self, apikey: str = "", request: Optional[Request] = None) -> None:
+        """
+        用写入 RSS 的同一 settings.API_TOKEN 校验查询参数 / X-API-KEY。
+
+        播客端点使用 allow_anonymous + 本方法，避开宿主 verify_apikey 在 V3
+        上附加的超级用户身份校验（密钥正确仍可能 401）。
+        """
+        provided = (apikey or "").strip()
+        if not provided and request is not None:
+            provided = (request.query_params.get("apikey") or "").strip()
+            if not provided:
+                provided = (request.headers.get("x-api-key") or "").strip()
+        expected = (getattr(settings, "API_TOKEN", None) or "").strip()
+        if not check_apikey(provided, expected):
+            # 不打印完整密钥；仅记录长度便于排查「看错密钥 / 前后空格」
+            logger.warning(
+                f"[AudiobookPodcast] apikey 校验失败 "
+                f"(provided_len={len(provided)}, expected_len={len(expected)})"
+            )
+            raise HTTPException(
+                status_code=401,
+                detail="apikey 校验不通过",
+                headers={"WWW-Authenticate": "ApiKey"},
+            )
+
     def get_api(self) -> List[Dict[str, Any]]:
         # feed / audio 必须声明原生响应：Apple 播客按 RSS/音频字节消费，不能套 JSON envelope。
         # HEAD 是 Apple Podcasts 拉 enclosure 前的探测请求，缺了会提示无法播放。
+        # allow_anonymous=True：由插件自行校验 apikey，避免宿主 V3 verify_apikey
+        # 在密钥匹配后仍因超级用户身份校验返回 401。
         return [
             {
                 "path": "/books",
                 "endpoint": self.api_list_books,
                 "methods": ["GET"],
-                "auth": "apikey",
+                "allow_anonymous": True,
                 "summary": "列出所有有声书",
                 "description": "返回扫描目录下所有有声书及其 RSS 订阅地址",
             },
@@ -243,7 +270,7 @@ class AudiobookPodcast(_PluginBase):
                 "path": "/feed",
                 "endpoint": self.api_get_feed,
                 "methods": ["GET", "HEAD"],
-                "auth": "apikey",
+                "allow_anonymous": True,
                 "summary": "获取有声书 RSS 订阅源",
                 "description": "返回指定有声书的 RSS 2.0 XML（兼容 Apple Podcasts / iOS 播客）",
                 "response_model": None,
@@ -260,7 +287,7 @@ class AudiobookPodcast(_PluginBase):
                 "path": "/audio",
                 "endpoint": self.api_serve_audio,
                 "methods": ["GET", "HEAD"],
-                "auth": "apikey",
+                "allow_anonymous": True,
                 "summary": "获取音频/封面文件",
                 "description": "返回音频或封面图片，支持 HTTP HEAD 与 Range 分片",
                 "response_model": None,
@@ -1065,16 +1092,17 @@ class AudiobookPodcast(_PluginBase):
 
     # ──────────────────────────── API 端点实现 ────────────────────────────
 
-    def api_list_books(self) -> dict:
+    def api_list_books(self, apikey: str = "") -> dict:
         """列出所有有声书及其 RSS 订阅地址。"""
+        self._require_apikey(apikey)
         if not self._enabled:
             raise HTTPException(status_code=503, detail="插件未启用")
 
-        apikey = getattr(settings, "API_TOKEN", "")
+        token = getattr(settings, "API_TOKEN", "")
         books = self._scan_books()
         result = []
         for b in books:
-            feed_url = self._plugin_api_url("/feed", book=b["name"], apikey=apikey)
+            feed_url = self._plugin_api_url("/feed", book=b["name"], apikey=token)
             result.append(
                 {
                     "name": b["name"],
@@ -1084,11 +1112,12 @@ class AudiobookPodcast(_PluginBase):
             )
         return {"total": len(result), "books": result}
 
-    def api_get_feed(self, book: str = "") -> Response:
+    def api_get_feed(self, book: str = "", apikey: str = "") -> Response:
         """
         返回指定有声书的 RSS 2.0 XML 订阅源。
         查询参数 `book` 为书目录名称（URL 编码）。
         """
+        self._require_apikey(apikey)
         if not self._enabled:
             raise HTTPException(status_code=503, detail="插件未启用")
         if not book:
@@ -1105,11 +1134,18 @@ class AudiobookPodcast(_PluginBase):
             media_type="application/rss+xml; charset=utf-8",
         )
 
-    def api_serve_audio(self, request: Request, book: str = "", file: str = "") -> Response:
+    def api_serve_audio(
+        self,
+        request: Request,
+        book: str = "",
+        file: str = "",
+        apikey: str = "",
+    ) -> Response:
         """
         提供音频或封面访问。Apple 播客会先发 HEAD 再发 Range GET；
         由 FileResponse 处理分片，避免 chunked 传输导致 iOS 无法播放。
         """
+        self._require_apikey(apikey, request=request)
         if not self._enabled:
             raise HTTPException(status_code=503, detail="插件未启用")
         if not book or not file:

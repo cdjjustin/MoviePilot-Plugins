@@ -57,6 +57,20 @@ def media_headers() -> Dict[str, str]:
     }
 
 
+def check_apikey(provided: Optional[str], expected: Optional[str]) -> bool:
+    """
+    Compare podcast URL apikey with the token embedded by the plugin.
+
+    Must use the same settings.API_TOKEN source that builds RSS enclosure URLs.
+    Do not rely on host verify_apikey alone: MoviePilot V3 also validates a
+    superuser identity after the key match, which can 401 podcast clients even
+    when the query apikey is correct.
+    """
+    left = (provided or "").strip()
+    right = (expected or "").strip()
+    return bool(left) and bool(right) and left == right
+
+
 def serve_media_file(path: Path, media_type: Optional[str] = None) -> Response:
     """
     Serve audio/cover with HEAD + Range support via FileResponse.
