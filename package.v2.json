@@ -3,15 +3,16 @@
         "name": "有声书播客",
         "description": "扫描本地有声书目录，生成 iOS 播客（Apple Podcasts）兼容的 RSS 2.0 订阅源",
         "labels": "有声书,播客,RSS,iTunes,Apple Podcasts",
-        "version": "1.0.6",
+        "version": "1.0.7",
         "icon": "Audiobookshelf_A.png",
         "author": "cdjjustin",
         "level": 1,
         "history": {
-            "v1.0.0": "初始版本，支持目录扫描、RSS 生成、音频流式服务、封面图、时长标签",
-            "v1.0.4": "从文件名解析季号和集号，修复平铺目录下 itunes:season/episode 错误",
+            "v1.0.7": "修复 iOS 播客无法播放：enclosure 声明 HEAD/Range 原生响应，MIME 对齐 Apple 白名单，避免 no-store/chunked 导致单集无法播放",
+            "v1.0.6": "优化播放稳定性：对 /audio 显式实现 Range 分片；RSS 生成过滤最近修改文件",
             "v1.0.5": "优化通知策略：定时监控仅通知全新有声书；重新整理全量通知所有书籍",
-            "v1.0.6": "优化播放稳定性：对 /audio 显式实现 Range 分片；RSS 生成过滤最近修改文件"
+            "v1.0.4": "从文件名解析季号和集号，修复平铺目录下 itunes:season/episode 错误",
+            "v1.0.0": "初始版本，支持目录扫描、RSS 生成、音频流式服务、封面图、时长标签"
         }
     }
 }

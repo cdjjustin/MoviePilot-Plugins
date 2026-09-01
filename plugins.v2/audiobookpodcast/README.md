@@ -12,9 +12,11 @@
 | 多层目录支持 | 支持 CD1/CD2 等子文件夹结构 |
 | 封面自动识别 | 检测目录中的 cover/folder/front/artwork 图片 |
 | 音频时长 | 借助 mutagen 读取，写入 `<itunes:duration>` |
-| 流式传输 | 支持 HTTP Range 请求，iOS 播客可拖拽进度条 |
+| 流式传输 | 支持 HTTP HEAD 与 Range，iOS 播客可探测并拖拽进度条 |
 | 路径安全 | 路径归一化 + `relative_to` 检查，防目录遍历 |
 | API 鉴权 | 使用 MoviePilot API Token（apikey 模式） |
+
+> **升级 MoviePilot 后无法播放：** iOS 提示「无法在此设备上播放此单集」通常是 enclosure 的 HEAD/Range/MIME 不符合 Apple 要求，或 `API_TOKEN` 被重新生成导致订阅地址里的 `apikey` 失效。请更新到本插件 1.0.7+，并在插件详情页重新复制订阅地址。
 
 ---
 
