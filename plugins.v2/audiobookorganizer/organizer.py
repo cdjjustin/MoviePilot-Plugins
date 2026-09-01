@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
+import errno
+import os
 import shutil
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 
 import httpx
 
@@ -16,6 +17,7 @@ from .tagger import save_cover, write_tags
 
 
 DEFAULT_TEMPLATE = "{author}/{title}/S{season:02d}E{episode:02d} - {episode_title}{ext}"
+OrganizeMode = Literal["move", "hardlink", "copy"]
 
 
 def merge_metadata(
@@ -80,11 +82,25 @@ def preview_plan(
     source_root: Path,
     target_root: Path,
     template: str = DEFAULT_TEMPLATE,
+    organize_mode: OrganizeMode = "hardlink",
 ) -> OrganizePlan:
     """生成整理预览计划，不修改任何文件。"""
     plan_id = uuid.uuid4().hex[:12]
     warnings: List[str] = []
     changes: List[FileChange] = []
+
+    if organize_mode == "hardlink":
+        if source_root.resolve() == target_root.resolve():
+            warnings.append("源目录与目标目录相同，硬链接无意义，将按移动模式处理")
+        else:
+            warnings.append(
+                "硬链接模式：源文件保持原位（不影响做种），仅在目标目录创建硬链接；"
+                "不写入音频标签（硬链接与源文件共享数据，写入标签会改变文件哈希）"
+            )
+    elif organize_mode == "copy":
+        warnings.append("复制模式：源文件保持不变，在目标目录创建副本并写入标签")
+    else:
+        warnings.append("移动模式：源文件将被移动/重命名到目标目录")
 
     if not metadata.title:
         warnings.append("元数据缺少书名，将使用目录名")
@@ -162,13 +178,17 @@ def apply_plan(
     *,
     target_root: Path,
     cover_url: str = "",
+    organize_mode: OrganizeMode = "hardlink",
     dry_run: bool = False,
 ) -> Dict[str, object]:
     """执行整理计划。"""
     results = {"success": [], "skipped": [], "errors": []}
 
+    effective_mode = _effective_mode(organize_mode, plan.changes)
+    write_tags_enabled = effective_mode in ("move", "copy")
+
     cover_data: Optional[bytes] = None
-    if cover_url:
+    if cover_url and write_tags_enabled:
         cover_data = _download_cover(cover_url)
 
     for change in plan.changes:
@@ -184,34 +204,89 @@ def apply_plan(
             continue
 
         if dry_run:
-            results["success"].append({"source": change.source, "target": change.target, "dry_run": True})
+            results["success"].append({
+                "source": change.source,
+                "target": change.target,
+                "mode": effective_mode,
+                "dry_run": True,
+            })
             continue
 
         try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if src.resolve() != dst.resolve():
-                shutil.move(str(src), str(dst))
-            write_tags(
-                dst,
-                title=change.tags.get("title", ""),
-                author=change.tags.get("author", ""),
-                narrator=change.tags.get("narrator", ""),
-                album=change.tags.get("album", ""),
-                track_number=int(change.tags.get("track_number", 0) or 0),
-                description=plan.metadata.description,
-                cover_data=cover_data,
-            )
-            results["success"].append({"source": change.source, "target": change.target})
+            used_mode = _place_file(src, dst, effective_mode)
+            if write_tags_enabled or used_mode == "copy_fallback":
+                write_tags(
+                    dst,
+                    title=change.tags.get("title", ""),
+                    author=change.tags.get("author", ""),
+                    narrator=change.tags.get("narrator", ""),
+                    album=change.tags.get("album", ""),
+                    track_number=int(change.tags.get("track_number", 0) or 0),
+                    description=plan.metadata.description,
+                    cover_data=cover_data,
+                )
+            results["success"].append({
+                "source": change.source,
+                "target": change.target,
+                "mode": used_mode,
+            })
         except Exception as exc:
             results["errors"].append({"source": change.source, "error": str(exc)})
 
-    if cover_data and plan.cover_path and not dry_run:
+    if cover_data and plan.cover_path and write_tags_enabled and not dry_run:
         try:
             save_cover(cover_data, Path(plan.cover_path).parent)
         except Exception as exc:
             results["errors"].append({"cover": plan.cover_path, "error": str(exc)})
+    elif plan.cover_path and organize_mode == "hardlink" and cover_url and not dry_run:
+        # 硬链接模式仍可在目标目录保存封面图（独立文件，不影响源）
+        cover_data = cover_data or _download_cover(cover_url)
+        if cover_data:
+            try:
+                save_cover(cover_data, Path(plan.cover_path).parent)
+            except Exception as exc:
+                results["errors"].append({"cover": plan.cover_path, "error": str(exc)})
 
     return results
+
+
+def _effective_mode(mode: OrganizeMode, changes: List[FileChange]) -> OrganizeMode:
+    """源与目标为同一文件时无需操作；同目录硬链接降级为移动。"""
+    if mode != "hardlink" or not changes:
+        return mode
+    sources = {Path(c.source).parent.resolve() for c in changes}
+    targets = {Path(c.target).parent.resolve() for c in changes}
+    if sources == targets:
+        return "move"
+    return mode
+
+
+def _place_file(src: Path, dst: Path, mode: OrganizeMode) -> str:
+    """将源文件放置到目标路径，返回实际使用的模式。"""
+    if src.resolve() == dst.resolve():
+        return "skip"
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    if mode == "move":
+        shutil.move(str(src), str(dst))
+        return "move"
+
+    if mode == "hardlink":
+        try:
+            os.link(src, dst)
+            return "hardlink"
+        except OSError as exc:
+            if exc.errno == errno.EXDEV:
+                shutil.copy2(str(src), str(dst))
+                return "copy_fallback"
+            raise
+
+    if mode == "copy":
+        shutil.copy2(str(src), str(dst))
+        return "copy"
+
+    raise ValueError(f"未知的整理模式: {mode}")
 
 
 def _download_cover(url: str) -> Optional[bytes]:

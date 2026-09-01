@@ -117,3 +117,54 @@ def test_compute_confidence_low():
     meta = AudiobookMetadata(title="完全不同的书")
     score = compute_confidence("三体", meta, 10)
     assert score < 0.5
+
+
+def test_apply_plan_hardlink_keeps_source(sample_book, sample_metadata, tmp_path: Path):
+    source_root = sample_book.path.parent
+    target = tmp_path / "library"
+    plan = preview_plan(
+        sample_book,
+        sample_metadata,
+        source_root=source_root,
+        target_root=target,
+        organize_mode="hardlink",
+    )
+    assert any("硬链接" in w for w in plan.warnings)
+
+    original_paths = [f.path for f in sample_book.files]
+    result = apply_plan(
+        plan,
+        target_root=target,
+        organize_mode="hardlink",
+    )
+    assert len(result["success"]) == 3
+    assert all(item["mode"] == "hardlink" for item in result["success"])
+
+    for orig in original_paths:
+        assert orig.exists(), "源文件应保留在原位"
+
+    for change in plan.changes:
+        dst = Path(change.target)
+        assert dst.exists()
+        assert dst.stat().st_ino == Path(change.source).stat().st_ino
+
+
+def test_apply_plan_copy_keeps_source(sample_book, sample_metadata, tmp_path: Path):
+    source_root = sample_book.path.parent
+    target = tmp_path / "library"
+    plan = preview_plan(
+        sample_book,
+        sample_metadata,
+        source_root=source_root,
+        target_root=target,
+        organize_mode="copy",
+    )
+    result = apply_plan(plan, target_root=target, organize_mode="copy")
+    assert len(result["success"]) == 3
+    assert all(item["mode"] == "copy" for item in result["success"])
+    assert sample_book.files[0].path.exists()
+
+    for change in plan.changes:
+        dst = Path(change.target)
+        assert dst.exists()
+        assert dst.stat().st_ino != Path(change.source).stat().st_ino
