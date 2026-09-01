@@ -20,6 +20,32 @@ DEFAULT_TEMPLATE = "{author}/{title}/S{season:02d}E{episode:02d} - {episode_titl
 OrganizeMode = Literal["move", "hardlink", "copy"]
 
 
+def build_local_metadata(book: BookEntry) -> AudiobookMetadata:
+    """从本地目录名与文件名构建最小元数据（无刮削结果时使用）。"""
+    return AudiobookMetadata(
+        title=book.name,
+        source="local",
+        source_id=book.book_id,
+    )
+
+
+def resolve_metadata(
+    book: BookEntry,
+    metadata: Optional[AudiobookMetadata],
+    *,
+    local_fallback: bool = False,
+) -> Tuple[AudiobookMetadata, bool]:
+    """
+    解析最终用于整理的元数据。
+    返回 (metadata, used_local_fallback)。
+    """
+    if metadata and metadata.title:
+        return metadata, False
+    if local_fallback:
+        return build_local_metadata(book), True
+    return metadata or AudiobookMetadata(title=""), False
+
+
 def merge_metadata(
     ximalaya: Optional[AudiobookMetadata],
     douban: Optional[AudiobookMetadata],

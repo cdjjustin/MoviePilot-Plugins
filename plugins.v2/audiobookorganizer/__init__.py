@@ -24,9 +24,11 @@ from .models import AudiobookMetadata, BookEntry, OrganizePlan, SearchResult
 from .organizer import (
     DEFAULT_TEMPLATE,
     apply_plan,
+    build_local_metadata,
     compute_confidence,
     merge_metadata,
     preview_plan,
+    resolve_metadata,
 )
 from .scanner import scan_directory
 from .scrapers import DoubanScraper, XimalayaScraper
@@ -55,7 +57,7 @@ class AudiobookOrganizer(_PluginBase):
     plugin_name = "有声书刮削整理"
     plugin_desc = "从豆瓣/喜马拉雅刮削元数据，批量整理有声书文件（重命名、目录、标签、封面）"
     plugin_icon = "Audiobookshelf_A.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookorganizer_"
@@ -73,6 +75,7 @@ class AudiobookOrganizer(_PluginBase):
     _monitor_interval: int = 60
     _monitor_mode: str = "notify"
     _organize_mode: str = "hardlink"
+    _local_fallback_enabled: bool = True
     _confidence_threshold: float = 0.85
 
     # 运行时缓存
@@ -93,6 +96,7 @@ class AudiobookOrganizer(_PluginBase):
         self._monitor_enabled = bool(config.get("monitor_enabled", False))
         self._monitor_mode = (config.get("monitor_mode") or "notify").strip()
         self._organize_mode = (config.get("organize_mode") or "hardlink").strip()
+        self._local_fallback_enabled = bool(config.get("local_fallback_enabled", True))
         try:
             self._monitor_interval = max(5, int(config.get("monitor_interval") or 60))
         except (ValueError, TypeError):
@@ -212,6 +216,7 @@ class AudiobookOrganizer(_PluginBase):
         metadata = AudiobookMetadata.from_dict(metadata_dict)
         if not metadata.title and body.get("source") and body.get("source_id"):
             metadata = self._fetch_metadata(body["source"], body["source_id"])
+        metadata, _ = resolve_metadata(book, metadata, local_fallback=self._local_fallback_enabled)
 
         source_root = Path(self._source_path)
         target_root = Path(self._target_path or self._source_path)
@@ -416,6 +421,25 @@ class AudiobookOrganizer(_PluginBase):
                                 "content": [
                                     {
                                         "component": "VSwitch",
+                                        "props": {
+                                            "model": "local_fallback_enabled",
+                                            "label": "无刮削时本地整理",
+                                            "hint": "刮削失败时按目录名/文件名整理",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
                                         "props": {"model": "monitor_enabled", "label": "启用目录监控"},
                                     }
                                 ],
@@ -472,6 +496,7 @@ class AudiobookOrganizer(_PluginBase):
             "source_path": "",
             "target_path": "",
             "organize_mode": "hardlink",
+            "local_fallback_enabled": True,
             "naming_template": DEFAULT_TEMPLATE,
             "source_priority": "ximalaya_first",
             "douban_cookie": "",
@@ -618,13 +643,26 @@ class AudiobookOrganizer(_PluginBase):
 
         for book in books:
             results = self._search_all(book.name)
-            if not results:
+            metadata: Optional[AudiobookMetadata] = None
+            used_local_fallback = False
+
+            if results:
+                best = results[0]
+                metadata = self._fetch_metadata(best.source, best.source_id)
+
+            metadata, used_local_fallback = resolve_metadata(
+                book,
+                metadata,
+                local_fallback=self._local_fallback_enabled,
+            )
+
+            if not metadata.title:
                 notify_lines.append(f"• 《{book.name}》：未找到匹配元数据")
                 continue
 
-            best = results[0]
-            metadata = self._fetch_metadata(best.source, best.source_id)
-            confidence = compute_confidence(book.name, metadata, len(book.files))
+            confidence = 1.0 if used_local_fallback else compute_confidence(
+                book.name, metadata, len(book.files)
+            )
 
             if self._monitor_mode == "auto" and confidence >= self._confidence_threshold:
                 plan = preview_plan(
@@ -642,11 +680,15 @@ class AudiobookOrganizer(_PluginBase):
                     organize_mode=self._organize_mode,
                 )
                 self._append_history(plan, result)
-                auto_applied.append(f"• 《{book.name}》（置信度 {confidence:.0%}）")
+                label = "本地信息" if used_local_fallback else f"置信度 {confidence:.0%}"
+                auto_applied.append(f"• 《{book.name}》（{label}）")
             else:
-                notify_lines.append(
-                    f"• 《{book.name}》→ {metadata.title}（置信度 {confidence:.0%}，需手动确认）"
-                )
+                if used_local_fallback:
+                    notify_lines.append(f"• 《{book.name}》：无刮削结果，可按本地信息整理")
+                else:
+                    notify_lines.append(
+                        f"• 《{book.name}》→ {metadata.title}（置信度 {confidence:.0%}，需手动确认）"
+                    )
 
         if auto_applied:
             self.post_message(
