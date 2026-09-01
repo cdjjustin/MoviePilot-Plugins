@@ -11,10 +11,12 @@ sys.path.insert(0, str(PLUGIN_DIR))
 from audiobookorganizer.models import AudiobookMetadata, AudioFile, BookEntry, TrackInfo  # noqa: E402
 from audiobookorganizer.organizer import (  # noqa: E402
     apply_plan,
+    build_local_metadata,
     compute_confidence,
     match_tracks,
     merge_metadata,
     preview_plan,
+    resolve_metadata,
 )
 
 
@@ -117,6 +119,40 @@ def test_compute_confidence_low():
     meta = AudiobookMetadata(title="完全不同的书")
     score = compute_confidence("三体", meta, 10)
     assert score < 0.5
+
+
+def test_build_local_metadata(sample_book):
+    meta = build_local_metadata(sample_book)
+    assert meta.title == "三体"
+    assert meta.source == "local"
+    assert meta.author == ""
+
+
+def test_resolve_metadata_with_fallback(sample_book):
+    meta, used = resolve_metadata(sample_book, AudiobookMetadata(title=""), local_fallback=True)
+    assert used is True
+    assert meta.title == "三体"
+
+
+def test_resolve_metadata_without_fallback(sample_book):
+    meta, used = resolve_metadata(sample_book, AudiobookMetadata(title=""), local_fallback=False)
+    assert used is False
+    assert meta.title == ""
+
+
+def test_preview_plan_local_metadata_only(sample_book, tmp_path: Path):
+    target = tmp_path / "output"
+    local_meta = build_local_metadata(sample_book)
+    plan = preview_plan(
+        sample_book,
+        local_meta,
+        source_root=sample_book.path.parent,
+        target_root=target,
+        organize_mode="hardlink",
+    )
+    assert len(plan.changes) == 3
+    assert any("未知作者" in c.target for c in plan.changes)
+    assert any("三体" in c.target for c in plan.changes)
 
 
 def test_apply_plan_hardlink_keeps_source(sample_book, sample_metadata, tmp_path: Path):
