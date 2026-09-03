@@ -113,6 +113,19 @@ package.v3.json
 
 将本仓库地址配置到 MoviePilot **V3** 插件市场的第三方源后刷新市场，即可看到并安装「有声书刮削整理」。
 
+### V3 市场不显示时排查
+
+1. **确认 `PLUGIN_MARKET` 包含本仓库**（设定 → 系统 / `app.env`）：
+   ```
+   https://github.com/cdjjustin/MoviePilot-Plugins
+   ```
+   多个地址用英文逗号分隔。本仓库不在官方 Wiki 默认清单里，必须手写进去。
+2. **强制刷新**插件市场（不要只点普通同步）。合并 `package.v3.json` 之前若已同步过，宿主可能把该文件的 404 缓存约 30 分钟。
+3. **网络与 Token**：能访问 `raw.githubusercontent.com`；建议配置 `GITHUB_TOKEN`，国内建议配置 `GITHUB_PROXY`。
+4. 在市场搜索框搜：`有声书刮削` 或 `AudiobookOrganizer`。
+5. 浏览器直接验证索引是否可读：
+   `https://raw.githubusercontent.com/cdjjustin/MoviePilot-Plugins/main/package.v3.json`
+
 ### MoviePilot V2
 
 仍可通过 `plugins.v2/` + `package.v2.json` 安装旧版（v1.0.2）。V3 宿主请使用本目录的 V3 实现。
