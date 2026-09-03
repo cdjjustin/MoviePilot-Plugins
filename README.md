@@ -30,21 +30,24 @@ MoviePilot 官方插件仓库，也是 MoviePilot 插件市场默认读取的插
 MoviePilot-Plugins/
 ├── plugins/                 # 默认插件目录，通常也是兼容旧版本或通用版本的入口
 ├── plugins.v2/              # V2 专用插件目录
+├── plugins.v3/              # V3 专用插件目录
 ├── icons/                   # 插件图标资源
 ├── package.json             # 默认插件索引；可通过 "v2": true 声明兼容 V2
 ├── package.v2.json          # V2 优先插件索引
+├── package.v3.json          # V3 优先插件索引（MoviePilot 3.x 市场读取）
 ├── docs/                    # 开发与维护文档
 └── .github/workflows/       # 发布工作流
 ```
 
 ## 版本与加载规则
 
-- MoviePilot 会优先读取 `package.v2.json` 中与当前版本标识匹配的插件定义。
-- 如果某个插件不在 `package.v2.json` 中，但其 `package.json` 条目声明了 `"v2": true`，则会作为“兼容 V2 的默认插件”继续显示和安装。
-- `package.v2.json` 中的插件代码通常放在 `plugins.v2/<plugin_id_lower>/`；`package.json` 中的插件代码通常放在 `plugins/<plugin_id_lower>/`。
-- 插件如果依赖特定主系统版本，可在条目中增加 `system_version`，格式参考 pip 依赖版本范围，例如 `">=2.12.0,<3"`；未定义该字段时不做主系统版本检查。
+- MoviePilot V3 会优先读取 `package.v3.json`（代码在 `plugins.v3/`）；纯 `package.v2.json` 仓库在 V3 市场可能贡献 0 个可见条目。
+- MoviePilot V2 会优先读取 `package.v2.json`；如果某个插件不在 `package.v2.json` 中，但其 `package.json` 条目声明了 `"v2": true`，则会作为兼容 V2 的默认插件继续显示和安装。
+- `package.v3.json` 对应 `plugins.v3/`；`package.v2.json` 对应 `plugins.v2/`；`package.json` 对应 `plugins/`。
+- 若已提供 V3 专用实现，应在 `package.v2.json` 同名条目上声明 `"v3": false`，避免 V3 回退加载旧合同。
+- 插件如果依赖特定主系统版本，可在条目中增加 `system_version`，格式参考 pip 依赖版本范围，例如 `">=3.0.0"`；未定义该字段时不做主系统版本检查。
 - 插件目录名必须是插件类名的小写形式，插件主类必须定义在对应目录的 `__init__.py` 中。
-- 插件市场里看到的版本、图标、作者、权限级别，都来自 `package.json` / `package.v2.json`；运行时真正生效的类属性来自插件代码中的 `plugin_*` 字段，两者必须保持同步。
+- 插件市场里看到的版本、图标、作者、权限级别，都来自对应代际的 package 索引；运行时真正生效的类属性来自插件代码中的 `plugin_*` 字段，两者必须保持同步。
 
 ## 第三方插件库开发说明
 > 请不要开发用于破解 MoviePilot 用户认证、色情、赌博等违法违规内容的插件，共同维护健康的开发环境。
@@ -52,8 +55,8 @@ MoviePilot-Plugins/
 
 ### 1. 目录结构
 - 插件仓库建议直接 fork 本项目并保持同样的目录布局，仅支持 GitHub 仓库。
-- `plugins` 和 `plugins.v2` 都是“一个插件一个目录”的结构，**目录名必须为插件类名的小写**，插件主类放在对应目录的 `__init__.py` 中。
-- `package.json` / `package.v2.json` 是插件市场的索引文件。MoviePilot 会按版本选择合适的索引读取插件信息，因此这两个文件中的元数据需要和插件代码保持一致。
+- `plugins`、`plugins.v2`、`plugins.v3` 都是“一个插件一个目录”的结构，**目录名必须为插件类名的小写**，插件主类放在对应目录的 `__init__.py` 中。
+- `package.json` / `package.v2.json` / `package.v3.json` 是插件市场的索引文件。MoviePilot 会按版本选择合适的索引读取插件信息，因此这些文件中的元数据需要和插件代码保持一致。
 - 如果插件带有独立文档、示例或远程组件产物，建议放在插件目录下并在插件目录内提供 `README.md` 说明。
 
 ### 2. 插件图标
@@ -151,9 +154,9 @@ MoviePilot-Plugins/
 ```
 - 新增加的插件建议追加在索引文件末尾，便于在插件市场中作为较新的条目出现。
 - 如果插件目录文件较多，或你希望用户直接下载压缩包安装，可以在对应索引条目中增加 `"release": true`。
-- 当前仓库的 GitHub Actions 发布工作流只会在 `package.json` 或 `package.v2.json` 发生变更时触发，并且只处理声明了 `"release": true` 的插件。
+- 当前仓库的 GitHub Actions 发布工作流会在 `package.json`、`package.v2.json` 或 `package.v3.json` 发生变更时触发，并且只处理声明了 `"release": true` 的插件。
 - 发布工作流会按下面的规则打包与创建 Release：
-  - 插件目录优先在 `plugins/<plugin_id_lower>` 和 `plugins.v2/<plugin_id_lower>` 中查找
+  - 插件目录优先在 `plugins/<plugin_id_lower>`、`plugins.v2/<plugin_id_lower>`、`plugins.v3/<plugin_id_lower>` 中查找
   - Tag 格式为 `插件ID_v插件版本号`
   - 资产文件名格式为 `插件目录小写_v插件版本号.zip`
   - 如果自上一个同插件 Tag 以来目录没有变化，则会跳过打包
