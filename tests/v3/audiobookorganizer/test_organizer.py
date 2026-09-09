@@ -141,6 +141,48 @@ def test_resolve_metadata_without_fallback(sample_book):
     assert meta.title == ""
 
 
+def test_assign_unique_episodes_extras_and_duplicate_集(tmp_path: Path):
+    from audiobookorganizer.organizer import assign_unique_episodes, match_tracks
+    import re
+
+    book_dir = tmp_path / "drama"
+    book_dir.mkdir()
+    names = [
+        "【主题曲】少年无恙 - 周笔畅.mp3",
+        "第1集 局中挣扎.mp3",
+        "第1集-解救狮子园.mp3",
+        "【插曲】一步天涯 - 高嘉朗.mp3",
+        "第2集 相亲相近.mp3",
+        "第2集-佛道之辨.mp3",
+    ]
+    files = []
+    for name in names:
+        path = book_dir / name
+        path.write_bytes(b"x")
+        if "主题曲" in name or "插曲" in name:
+            season, episode = 0, None
+        else:
+            season, episode = None, int(re.search(r"第(\d+)集", name).group(1))
+        files.append(
+            AudioFile(
+                path=path,
+                relative_path=name,
+                season=season,
+                episode=episode,
+                episode_title=name.replace(".mp3", ""),
+            )
+        )
+
+    matched = match_tracks(files, [])
+    assigned = assign_unique_episodes(matched, default_season=1)
+    keys = [(s, e) for _, _, s, e in assigned]
+    assert len(keys) == len(set(keys))
+    assert keys[0] == (0, 1)  # 主题曲 -> S00E01
+    assert keys[1][0] == 1 and keys[2][0] == 1  # 两段第1集在 S01 且集号不同
+    assert keys[1][1] != keys[2][1]
+    assert keys[3] == (0, 2)  # 插曲 -> S00E02
+
+
 def test_cleanup_previous_outputs_removes_hardlinks_and_keeps_source(tmp_path: Path):
     from audiobookorganizer.organizer import cleanup_previous_outputs
 
