@@ -75,7 +75,34 @@ def test_get_page_renders_book_list_items(plugin: AudiobookOrganizer):
         return found
 
     assert find(page, "VDataTable") == []
-    items = find(page, "VListItem")
-    assert len(items) == 1
-    assert items[0]["props"]["title"] == "三体"
-    assert "1 个文件" in items[0]["props"]["subtitle"]
+    buttons = find(page, "VBtn")
+    labels = [b.get("text") for b in buttons]
+    assert "刮削整理" in labels
+    assert "本地整理" in labels
+    assert "全部本地整理（1）" in labels
+    organize = next(b for b in buttons if b.get("text") == "刮削整理")
+    assert organize["events"]["click"]["params"]["book_id"] == "b1"
+    assert organize["events"]["click"]["params"]["mode"] == "scrape"
+
+
+def test_api_organize_local(plugin: AudiobookOrganizer, tmp_path: Path, monkeypatch):
+    book_dir = tmp_path / "三体"
+    out = tmp_path / "out"
+    out.mkdir()
+    # rebuild plugin paths against real files from fixture
+    plugin._target_path = str(out)
+    books = __import__("audiobookorganizer.scanner", fromlist=["scan_directory"]).scan_directory(str(tmp_path))
+    assert books
+    plugin._books_cache = books
+    plugin._saved["last_scan"] = {
+        "time": "t",
+        "count": len(books),
+        "books": [b.to_dict() for b in books],
+    }
+
+    resp = plugin.api_organize(book_id=books[0].book_id, mode="local")
+    assert resp.success is True
+    assert resp.data["ok"] is True
+    assert resp.data["local"] is True
+    assert plugin._saved["last_scan"]["books"][0]["status"] == "organized"
+    assert plugin._saved.get("organize_history")
