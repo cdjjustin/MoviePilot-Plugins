@@ -1,5 +1,6 @@
 """整理模块测试。"""
 
+import os
 import sys
 from pathlib import Path
 
@@ -138,6 +139,32 @@ def test_resolve_metadata_without_fallback(sample_book):
     meta, used = resolve_metadata(sample_book, AudiobookMetadata(title=""), local_fallback=False)
     assert used is False
     assert meta.title == ""
+
+
+def test_cleanup_previous_outputs_removes_hardlinks_and_keeps_source(tmp_path: Path):
+    from audiobookorganizer.organizer import cleanup_previous_outputs
+
+    source_root = tmp_path / "seed"
+    target_root = tmp_path / "library"
+    source_root.mkdir()
+    target_root.mkdir()
+    src = source_root / "ep.mp3"
+    src.write_bytes(b"audio")
+    old = target_root / "作者" / "书名" / "S01E304 - old.mp3"
+    old.parent.mkdir(parents=True)
+    os.link(src, old)
+    assert old.exists()
+    assert src.stat().st_nlink >= 2
+
+    result = cleanup_previous_outputs(
+        target_root=target_root,
+        source_paths=[src],
+        previous_targets=[str(old)],
+    )
+    assert result["deleted_count"] >= 1
+    assert not old.exists()
+    assert src.exists()
+    assert src.read_bytes() == b"audio"
 
 
 def test_preview_plan_uses_filename_season_episode(tmp_path: Path):

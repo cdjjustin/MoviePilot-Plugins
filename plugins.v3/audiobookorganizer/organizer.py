@@ -225,6 +225,7 @@ def apply_plan(
     cover_url: str = "",
     organize_mode: OrganizeMode = "hardlink",
     dry_run: bool = False,
+    replace_existing: bool = False,
 ) -> Dict[str, object]:
     """执行整理计划。"""
     results = {"success": [], "skipped": [], "errors": []}
@@ -245,8 +246,15 @@ def apply_plan(
             continue
 
         if dst.exists() and dst.resolve() != src.resolve():
-            results["skipped"].append({"target": change.target, "reason": "目标已存在"})
-            continue
+            if replace_existing and _is_safe_path(dst, target_root):
+                try:
+                    dst.unlink()
+                except OSError as exc:
+                    results["errors"].append({"target": change.target, "error": f"无法覆盖目标: {exc}"})
+                    continue
+            else:
+                results["skipped"].append({"target": change.target, "reason": "目标已存在"})
+                continue
 
         if dry_run:
             results["success"].append({
@@ -352,6 +360,115 @@ def _is_safe_path(target: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def cleanup_previous_outputs(
+    *,
+    target_root: Path,
+    source_paths: List[Path],
+    previous_targets: Optional[List[str]] = None,
+    previous_cover: str = "",
+) -> Dict[str, Any]:
+    """
+    删除目标目录中该书上次整理产生的输出。
+
+    - 优先删除 ``previous_targets`` 记录的路径
+    - 硬链接模式下，额外清理目标树内指向同一源文件 inode 的链接
+      （升级后首次重整理也能清掉错误的 S01… 输出）
+    - 只 unlink 目标路径，不会删除做种源文件
+    """
+    deleted: List[str] = []
+    errors: List[str] = []
+    root = target_root.resolve()
+    source_resolved = {p.resolve() for p in source_paths if p.exists()}
+
+    def _unlink_target(path: Path) -> None:
+        try:
+            if not path.exists() and not path.is_symlink():
+                return
+            if not _is_safe_path(path, root):
+                errors.append(f"拒绝删除目标外路径: {path}")
+                return
+            resolved = path.resolve()
+            if resolved in source_resolved:
+                return
+            if path.is_file() or path.is_symlink():
+                path.unlink(missing_ok=True)
+                deleted.append(str(path))
+        except OSError as exc:
+            errors.append(f"{path}: {exc}")
+
+    for item in previous_targets or []:
+        _unlink_target(Path(item))
+
+    if previous_cover:
+        _unlink_target(Path(previous_cover))
+
+    inode_to_source: Dict[Tuple[int, int], Path] = {}
+    for src in source_paths:
+        try:
+            st = src.stat()
+            inode_to_source[(st.st_dev, st.st_ino)] = src.resolve()
+        except OSError:
+            continue
+
+    if inode_to_source and root.is_dir():
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                if not _is_safe_path(path, root):
+                    continue
+                resolved = path.resolve()
+                if resolved in source_resolved:
+                    continue
+                st = path.stat()
+                src_resolved = inode_to_source.get((st.st_dev, st.st_ino))
+                if src_resolved is not None and resolved != src_resolved:
+                    path.unlink(missing_ok=True)
+                    deleted.append(str(path))
+            except OSError as exc:
+                errors.append(f"{path}: {exc}")
+
+    parents = {Path(p).parent for p in deleted}
+    for directory in sorted(parents, key=lambda p: len(p.parts), reverse=True):
+        _prune_empty_dirs(directory, root)
+
+    # unique preserve order
+    seen = set()
+    unique_deleted = []
+    for item in deleted:
+        if item not in seen:
+            seen.add(item)
+            unique_deleted.append(item)
+
+    return {
+        "deleted": unique_deleted,
+        "deleted_count": len(unique_deleted),
+        "errors": errors,
+    }
+
+
+def _prune_empty_dirs(directory: Path, root: Path) -> None:
+    """自下而上删除空目录，不越过 target_root。"""
+    current = directory
+    root = root.resolve()
+    while True:
+        try:
+            resolved = current.resolve()
+            resolved.relative_to(root)
+        except Exception:
+            break
+        if resolved == root:
+            break
+        try:
+            if current.is_dir() and not any(current.iterdir()):
+                current.rmdir()
+                current = current.parent
+                continue
+        except OSError:
+            break
+        break
 
 
 def compute_confidence(book_name: str, metadata: AudiobookMetadata, file_count: int) -> float:

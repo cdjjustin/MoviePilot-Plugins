@@ -21,6 +21,7 @@ from .organizer import (
     DEFAULT_TEMPLATE,
     apply_plan,
     build_local_metadata,
+    cleanup_previous_outputs,
     compute_confidence,
     merge_metadata,
     preview_plan,
@@ -53,7 +54,7 @@ class AudiobookOrganizer(_PluginBase):
     plugin_name = "有声书刮削整理"
     plugin_desc = "从豆瓣/喜马拉雅刮削元数据，批量整理有声书文件（重命名、目录、标签、封面）"
     plugin_icon = "https://raw.githubusercontent.com/cdjjustin/MoviePilot-Plugins/main/icons/Audiobookshelf_A.png"
-    plugin_version = "3.0.6"
+    plugin_version = "3.0.7"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookorganizer_"
@@ -335,10 +336,14 @@ class AudiobookOrganizer(_PluginBase):
             return self._response(False, data=result, message=result.get("error") or "整理失败")
 
         label = "本地信息" if result.get("local") else "刮削元数据"
+        deleted = int((result.get("cleanup") or {}).get("deleted_count") or 0)
+        message = f"《{result.get('book')}》已按{label}整理为《{result.get('title')}》"
+        if deleted:
+            message += f"；已清理旧输出 {deleted} 个文件"
         return self._response(
             True,
             data=result,
-            message=f"《{result.get('book')}》已按{label}整理为《{result.get('title')}》",
+            message=message,
         )
 
     def api_organize_all(
@@ -956,21 +961,25 @@ class AudiobookOrganizer(_PluginBase):
             )
 
             if self._monitor_mode == "auto" and confidence >= self._confidence_threshold:
+                target_root = Path(self._target_path or self._source_path)
+                cleanup_info = self._cleanup_before_organize(book, target_root)
                 plan = preview_plan(
                     book,
                     metadata,
                     source_root=Path(self._source_path),
-                    target_root=Path(self._target_path or self._source_path),
+                    target_root=target_root,
                     template=self._naming_template,
                     organize_mode=self._organize_mode,
                 )
                 result = apply_plan(
                     plan,
-                    target_root=Path(self._target_path or self._source_path),
+                    target_root=target_root,
                     cover_url=metadata.cover_url,
                     organize_mode=self._organize_mode,
+                    replace_existing=True,
                 )
-                self._append_history(plan, result)
+                self._append_history(plan, result, cleanup=cleanup_info)
+                self._save_organize_targets(book.book_id, plan, result)
                 label = "本地信息" if used_local_fallback else f"置信度 {confidence:.0%}"
                 auto_applied.append(f"• 《{book.name}》（{label}）")
             else:
@@ -1028,6 +1037,7 @@ class AudiobookOrganizer(_PluginBase):
 
         source_root = Path(self._source_path)
         target_root = Path(self._target_path or self._source_path)
+        cleanup_info = self._cleanup_before_organize(book, target_root)
         plan = preview_plan(
             book,
             metadata,
@@ -1041,8 +1051,10 @@ class AudiobookOrganizer(_PluginBase):
             target_root=target_root,
             cover_url=metadata.cover_url,
             organize_mode=self._organize_mode,
+            replace_existing=True,
         )
-        self._append_history(plan, result)
+        self._append_history(plan, result, cleanup=cleanup_info)
+        self._save_organize_targets(book.book_id, plan, result)
         self._update_book_status(book.book_id, "organized")
         return {
             "ok": True,
@@ -1053,7 +1065,59 @@ class AudiobookOrganizer(_PluginBase):
             "mode": mode,
             "plan_id": plan.plan_id,
             "result": result,
+            "cleanup": cleanup_info,
         }
+
+    def _cleanup_before_organize(self, book: BookEntry, target_root: Path) -> Dict[str, Any]:
+        """重新整理前清理目标目录中该书的旧输出。"""
+        store = self.get_data("last_organize_targets") or {}
+        prev = store.get(book.book_id) if isinstance(store, dict) else None
+        previous_targets: List[str] = []
+        previous_cover = ""
+        if isinstance(prev, dict):
+            previous_targets = list(prev.get("targets") or [])
+            previous_cover = str(prev.get("cover_path") or "")
+
+        # 兼容升级前未落库目标路径：从历史记录里尽量找回
+        if not previous_targets:
+            for item in self.get_data("organize_history") or []:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("book_id") == book.book_id or item.get("book") == book.name:
+                    previous_targets = list(item.get("targets") or [])
+                    previous_cover = previous_cover or str(item.get("cover_path") or "")
+                    if previous_targets:
+                        break
+
+        return cleanup_previous_outputs(
+            target_root=target_root,
+            source_paths=[f.path for f in book.files],
+            previous_targets=previous_targets,
+            previous_cover=previous_cover,
+        )
+
+    def _save_organize_targets(
+        self,
+        book_id: str,
+        plan: OrganizePlan,
+        result: dict,
+    ) -> None:
+        store = self.get_data("last_organize_targets") or {}
+        if not isinstance(store, dict):
+            store = {}
+        targets = [
+            item.get("target")
+            for item in (result.get("success") or [])
+            if isinstance(item, dict) and item.get("target")
+        ]
+        store[book_id] = {
+            "targets": targets,
+            "cover_path": plan.cover_path or "",
+            "title": plan.metadata.title,
+            "book_name": plan.book_name,
+            "time": datetime.now(timezone.utc).isoformat(),
+        }
+        self.save_data("last_organize_targets", store)
 
     def _update_book_status(self, book_id: str, status: str) -> None:
         last_scan = self.get_data("last_scan") or {}
@@ -1138,17 +1202,31 @@ class AudiobookOrganizer(_PluginBase):
                 )
         return None
 
-    def _append_history(self, plan: OrganizePlan, result: dict) -> None:
+    def _append_history(
+        self,
+        plan: OrganizePlan,
+        result: dict,
+        cleanup: Optional[Dict[str, Any]] = None,
+    ) -> None:
         history = self.get_data("organize_history") or []
+        targets = [
+            item.get("target")
+            for item in (result.get("success") or [])
+            if isinstance(item, dict) and item.get("target")
+        ]
         history.insert(
             0,
             {
                 "time": datetime.now(timezone.utc).isoformat(),
                 "book": plan.book_name,
+                "book_id": plan.book_id,
                 "plan_id": plan.plan_id,
                 "metadata_title": plan.metadata.title,
                 "success_count": len(result.get("success", [])),
                 "error_count": len(result.get("errors", [])),
+                "targets": targets,
+                "cover_path": plan.cover_path or "",
+                "cleanup_deleted": (cleanup or {}).get("deleted_count", 0),
             },
         )
         self.save_data("organize_history", history[:100])
