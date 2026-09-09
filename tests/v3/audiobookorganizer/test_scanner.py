@@ -181,6 +181,45 @@ def test_is_extra_track():
     assert not is_extra_track("第1集 局中挣扎")
 
 
+@pytest.mark.parametrize(
+    "stem,expect",
+    [
+        ("声娱文化 - 第一季·001 神秘小镇", (1, 1)),
+        ("001-第5季·001 载酒问心 上", (5, 1)),
+        ("第7季 第57集 邓凉远游 (下)", (7, 57)),
+    ],
+)
+def test_parse_real_voice_source_season_episode(stem, expect):
+    assert parse_season_ep_from_stem(stem) == expect
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "《剑来》广播剧第三季 PV",
+        "001-第5季·预告1 旧的回忆 上",
+        "剑来第6季 预告1",
+    ],
+)
+def test_real_voice_source_promos_are_extra_tracks(name):
+    from audiobookorganizer.scanner import is_extra_track
+
+    assert is_extra_track(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "普通标题 - PV - 后记",
+        "PV剧场特别篇",
+    ],
+)
+def test_pv_in普通_title_is_not_extra_track(name):
+    from audiobookorganizer.scanner import is_extra_track
+
+    assert not is_extra_track(name)
+
+
 def test_clean_book_name():
     assert clean_book_name("三体 128kbps") == "三体"
     assert clean_book_name("活着 [FLAC]") == "活着"

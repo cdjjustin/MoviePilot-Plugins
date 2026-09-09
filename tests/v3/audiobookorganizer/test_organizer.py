@@ -314,6 +314,45 @@ def test_preview_plan_season2_in_target_name(tmp_path: Path):
     assert "S02E15" in plan.changes[0].target
 
 
+def test_preview_source_like_multi_season_tree_resets_episode_per_season(tmp_path: Path):
+    book_dir = tmp_path / "剑来-声娱文化"
+    files = []
+    for season_name, season_num in (("第一季", 1), ("第二季", 2), ("第七季｜终局之战", 7)):
+        season_dir = book_dir / season_name
+        season_dir.mkdir(parents=True)
+        names = [
+            f"声娱文化 - {season_name.replace('｜终局之战', '')}·001 开篇.mp3",
+            f"声娱文化 - {season_name.replace('｜终局之战', '')}·002 续章.mp3",
+        ]
+        for name in names:
+            path = season_dir / name
+            path.write_bytes(b"x")
+            files.append(
+                AudioFile(
+                    path=path,
+                    relative_path=str(path.relative_to(book_dir)),
+                    season=season_num,
+                    episode=None,
+                    episode_title="开篇" if "001" in name else "续章",
+                )
+            )
+
+    book = BookEntry(book_id="source-like", name=book_dir.name, path=book_dir, files=files)
+    plan = preview_plan(
+        book,
+        build_local_metadata(book),
+        source_root=tmp_path,
+        target_root=tmp_path / "out",
+    )
+    names = [Path(change.target).name for change in plan.changes]
+    assert "S01E01 - 开篇.mp3" in names
+    assert "S01E02 - 续章.mp3" in names
+    assert "S02E01 - 开篇.mp3" in names
+    assert "S02E02 - 续章.mp3" in names
+    assert "S07E01 - 开篇.mp3" in names
+    assert "S07E02 - 续章.mp3" in names
+
+
 def test_cleanup_previous_outputs_removes_hardlinks_and_keeps_source(tmp_path: Path):
     from audiobookorganizer.organizer import cleanup_previous_outputs
 

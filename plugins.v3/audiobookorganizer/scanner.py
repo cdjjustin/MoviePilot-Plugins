@@ -21,7 +21,7 @@ _CN_DIGIT_MAP: Dict[str, int] = {
 _CN_NUM_RE = re.compile(
     r"[一二三四五六七八九两]?十[一二三四五六七八九]?|[一二三四五六七八九两零〇]"
 )
-_SEP_CLASS = r"[-_./．—–－〜~]"
+_SEP_CLASS = r"[-_./．·•—–－〜~]"
 _FNAME_SEASON_RE = re.compile(
     rf"第\s*([一二三四五六七八九十百千万两零〇]+|\d+)\s*季"
 )
@@ -35,8 +35,9 @@ _DIR_SEASON_RE = re.compile(
 )
 _LEADING_EP_RE = re.compile(rf"^(?:.*{_SEP_CLASS})?0*(\d{{1,4}})(?:\s*{_SEP_CLASS}|\s+|$)")
 _EXTRA_TRACK_RE = re.compile(
-    r"(?:【[^】]*(?:主题曲|片头曲|片尾曲|插曲|片头|片尾|预告|花絮|广告|彩蛋|BONUS|OP|ED)[^】]*】)"
-    r"|(?:^|[\s\-_.．])(?:主题曲|片头曲|片尾曲|插曲|片头|片尾|预告|花絮|广告|彩蛋)(?:$|[\s\-_.．])",
+    r"(?:【[^】]*(?:主题曲|片头曲|片尾曲|插曲|片头|片尾|预告|花絮|广告|彩蛋|PV|BONUS|OP|ED)[^】]*】)"
+    r"|(?:^|[\s\-_.．·•])(?:主题曲|片头曲|片尾曲|插曲|片头|片尾|预告|花絮|广告|彩蛋)(?:\s*\d*)?(?:$|[\s\-_.．·•])"
+    r"|(?:^|[\s\-_.．·•])PV\s*\d*$",
     re.IGNORECASE,
 )
 _NAME_JUNK_RE = re.compile(
