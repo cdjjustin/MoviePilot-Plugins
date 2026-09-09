@@ -53,7 +53,7 @@ class AudiobookOrganizer(_PluginBase):
     plugin_name = "有声书刮削整理"
     plugin_desc = "从豆瓣/喜马拉雅刮削元数据，批量整理有声书文件（重命名、目录、标签、封面）"
     plugin_icon = "https://raw.githubusercontent.com/cdjjustin/MoviePilot-Plugins/main/icons/Audiobookshelf_A.png"
-    plugin_version = "3.0.3"
+    plugin_version = "3.0.4"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookorganizer_"
@@ -540,33 +540,48 @@ class AudiobookOrganizer(_PluginBase):
         books = last_scan.get("books", [])
         history = (self.get_data("organize_history") or [])[:5]
 
-        # VDataTable 只展示扁平字段；嵌套 files 会干扰列渲染
-        table_items = [
-            {
-                "name": item.get("name", ""),
-                "file_count": item.get("file_count", len(item.get("files") or [])),
-                "status": item.get("status", "pending"),
-                "book_id": item.get("book_id", ""),
-            }
-            for item in books
-            if isinstance(item, dict)
-        ]
-        table_headers = [
-            {"title": title, "text": title, "key": key, "value": key}
-            for key, title in (
-                ("name", "书名"),
-                ("file_count", "文件数"),
-                ("status", "状态"),
+        # PageRender 会向组件默认插槽写入子节点；VDataTable/VList 的 items 属性和
+        # 默认插槽冲突时只显示分页不显示行。改用 content 显式渲染列表项。
+        status_label = {
+            "pending": "待整理",
+            "previewed": "已预览",
+            "organized": "已整理",
+            "failed": "失败",
+        }
+        book_nodes: List[dict] = []
+        for item in books:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name") or "未命名"
+            file_count = item.get("file_count", len(item.get("files") or []))
+            status = status_label.get(item.get("status", "pending"), item.get("status", "pending"))
+            book_nodes.append(
+                {
+                    "component": "VListItem",
+                    "props": {
+                        "title": name,
+                        "subtitle": f"{file_count} 个文件 · {status}",
+                        "lines": "two",
+                    },
+                }
             )
-        ]
-        history_items = [
-            {
-                "title": f"{item.get('book', '')} → {item.get('metadata_title', '')}",
-                "subtitle": item.get("time", ""),
-            }
-            for item in history
-            if isinstance(item, dict)
-        ]
+
+        history_nodes: List[dict] = []
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            book = item.get("book") or ""
+            title = item.get("metadata_title") or ""
+            history_nodes.append(
+                {
+                    "component": "VListItem",
+                    "props": {
+                        "title": f"{book} → {title}" if title else book,
+                        "subtitle": item.get("time") or "",
+                        "lines": "two",
+                    },
+                }
+            )
 
         return [
             {
@@ -621,22 +636,17 @@ class AudiobookOrganizer(_PluginBase):
                                 "content": [
                                     {
                                         "component": "VCardTitle",
-                                        "text": f"待整理书籍（{len(table_items)}）",
+                                        "text": f"待整理书籍（{len(book_nodes)}）",
                                     },
                                     {
                                         "component": "VCardText",
                                         "content": [
                                             {
-                                                "component": "VDataTable",
-                                                "props": {
-                                                    "headers": table_headers,
-                                                    "items": table_items,
-                                                    "items-per-page": 10,
-                                                    "density": "compact",
-                                                    "hover": True,
-                                                },
+                                                "component": "VList",
+                                                "props": {"lines": "two", "class": "py-0"},
+                                                "content": book_nodes,
                                             }
-                                            if table_items
+                                            if book_nodes
                                             else {
                                                 "component": "span",
                                                 "text": "暂无待整理书籍，请先扫描目录",
@@ -668,12 +678,10 @@ class AudiobookOrganizer(_PluginBase):
                                         "content": [
                                             {
                                                 "component": "VList",
-                                                "props": {
-                                                    "items": history_items,
-                                                    "lines": "two",
-                                                },
+                                                "props": {"lines": "two", "class": "py-0"},
+                                                "content": history_nodes,
                                             }
-                                            if history_items
+                                            if history_nodes
                                             else {
                                                 "component": "span",
                                                 "text": "暂无整理记录",

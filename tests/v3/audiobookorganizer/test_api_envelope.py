@@ -48,7 +48,7 @@ def test_api_scan_returns_strict_envelope(plugin: AudiobookOrganizer):
     assert "扫描完成" in payload["message"]
 
 
-def test_get_page_table_uses_flat_items(plugin: AudiobookOrganizer):
+def test_get_page_renders_book_list_items(plugin: AudiobookOrganizer):
     book = BookEntry(
         book_id="b1",
         name="三体",
@@ -74,9 +74,8 @@ def test_get_page_table_uses_flat_items(plugin: AudiobookOrganizer):
                 found.extend(find(n, name))
         return found
 
-    tables = find(page, "VDataTable")
-    assert len(tables) == 1
-    item = tables[0]["props"]["items"][0]
-    assert item["name"] == "三体"
-    assert item["file_count"] == 1
-    assert "files" not in item
+    assert find(page, "VDataTable") == []
+    items = find(page, "VListItem")
+    assert len(items) == 1
+    assert items[0]["props"]["title"] == "三体"
+    assert "1 个文件" in items[0]["props"]["subtitle"]
