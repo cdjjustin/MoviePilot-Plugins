@@ -248,6 +248,42 @@ def test_assign_unique_episodes_allows_same_ep_across_seasons(tmp_path: Path):
     assert keys == [(1, 15), (2, 15)]
 
 
+def test_preview_plan_subdir_seasons_like_podcast(tmp_path: Path):
+    """子目录分季时，本地整理应产出 S01 / S02，而不是全部 S01 连号。"""
+    book_dir = tmp_path / "剧"
+    files = []
+    for season_name, season_num, titles in [
+        ("第一季", 1, ["开篇", "续章"]),
+        ("第二季", 2, ["剑气长城", "情意绵绵"]),
+    ]:
+        d = book_dir / season_name
+        d.mkdir(parents=True)
+        for i, title in enumerate(titles, 1):
+            src = d / f"{i:02d} {title}.mp3"
+            src.write_bytes(b"ID3" + b"\x00" * 100)
+            files.append(
+                AudioFile(
+                    path=src,
+                    relative_path=f"{season_name}/{src.name}",
+                    season=season_num,
+                    episode=None,
+                    episode_title=title,
+                )
+            )
+    book = BookEntry(book_id="drama", name="剧", path=book_dir, files=files)
+    meta = AudiobookMetadata(title="剧", author="作者", source="local")
+    plan = preview_plan(
+        book,
+        meta,
+        source_root=book_dir,
+        target_root=tmp_path / "out",
+    )
+    targets = [Path(c.target).name for c in plan.changes]
+    assert any(n.startswith("S01E") for n in targets)
+    assert any(n.startswith("S02E") for n in targets)
+    assert not any(n.startswith("S01E03") for n in targets)  # 不应把第二季连进 S01
+
+
 def test_preview_plan_season2_in_target_name(tmp_path: Path):
     book_dir = tmp_path / "书"
     book_dir.mkdir()
