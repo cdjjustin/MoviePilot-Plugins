@@ -212,6 +212,36 @@ def test_ximalaya_fetch(mock_client_cls):
     assert meta.tracks[0].episode == 1
 
 
+def test_ximalaya_fetch_supports_album_page_main_info():
+    scraper = XimalayaScraper()
+    data = {
+        "data": {
+            "albumPageMainInfo": {
+                "albumTitle": "《剑来》上",
+                "anchorName": "大斌",
+                "categoryTitle": "有声书",
+                "cover": "//image.ximalaya.com/cover.jpg",
+                "richIntro": "剧情简介",
+            }
+        }
+    }
+
+    with patch("audiobookorganizer.scrapers.ximalaya.httpx.Client") as client_cls:
+        client = MagicMock()
+        client.__enter__ = MagicMock(return_value=client)
+        client.__exit__ = MagicMock(return_value=False)
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = data
+        client.get.return_value = response
+        client_cls.return_value = client
+        meta = scraper.fetch("12345")
+
+    assert meta.title == "《剑来》上"
+    assert meta.narrator == "大斌"
+    assert meta.cover_url == "https://image.ximalaya.com/cover.jpg"
+
+
 def test_title_score_exact_match():
     assert DoubanScraper._title_score("三体", "三体") == 1.0
     assert XimalayaScraper._title_score("三体", "三体（有声书）") == 0.85

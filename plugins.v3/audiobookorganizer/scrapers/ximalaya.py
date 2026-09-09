@@ -79,7 +79,7 @@ class XimalayaScraper(ScraperBase):
         payload = data.get("data")
         if not isinstance(payload, dict):
             return {}
-        album_page = payload.get("albumPageMainData")
+        album_page = payload.get("albumPageMainData") or payload.get("albumPageMainInfo")
         if isinstance(album_page, dict):
             album_data = album_page.get("album") or album_page.get("albumInfo") or album_page
         else:
@@ -89,7 +89,7 @@ class XimalayaScraper(ScraperBase):
             return {}
 
         title = album_data.get("albumTitle") or album_data.get("title") or ""
-        cover = album_data.get("coverPath") or album_data.get("coverLarge") or ""
+        cover = album_data.get("coverPath") or album_data.get("coverLarge") or album_data.get("cover") or ""
         intro = album_data.get("richIntro") or album_data.get("intro") or ""
         anchor = album_data.get("anchorName") or album_data.get("nickname") or ""
         category = album_data.get("categoryTitle") or album_data.get("categoryName") or ""
