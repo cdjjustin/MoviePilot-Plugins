@@ -53,7 +53,7 @@ class AudiobookOrganizer(_PluginBase):
     plugin_name = "有声书刮削整理"
     plugin_desc = "从豆瓣/喜马拉雅刮削元数据，批量整理有声书文件（重命名、目录、标签、封面）"
     plugin_icon = "https://raw.githubusercontent.com/cdjjustin/MoviePilot-Plugins/main/icons/Audiobookshelf_A.png"
-    plugin_version = "3.0.5"
+    plugin_version = "3.0.6"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookorganizer_"
@@ -341,7 +341,11 @@ class AudiobookOrganizer(_PluginBase):
             message=f"《{result.get('book')}》已按{label}整理为《{result.get('title')}》",
         )
 
-    def api_organize_all(self, mode: str = "local") -> schemas.Response[Dict[str, Any]]:
+    def api_organize_all(
+        self,
+        mode: str = "local",
+        force: str = "0",
+    ) -> schemas.Response[Dict[str, Any]]:
         if not self._enabled:
             raise HTTPException(status_code=503, detail="插件未启用")
         if not self._source_path:
@@ -350,6 +354,7 @@ class AudiobookOrganizer(_PluginBase):
         mode = (mode or "local").strip().lower()
         if mode not in {"scrape", "local"}:
             raise HTTPException(status_code=400, detail="mode 仅支持 scrape 或 local")
+        force_all = str(force or "0").strip().lower() in {"1", "true", "yes"}
 
         last_scan = self.get_data("last_scan") or {}
         books_data = last_scan.get("books") or []
@@ -361,7 +366,7 @@ class AudiobookOrganizer(_PluginBase):
         for item in books_data:
             if not isinstance(item, dict):
                 continue
-            if item.get("status") == "organized":
+            if not force_all and item.get("status") == "organized":
                 continue
             book = self._find_book(item.get("book_id") or "")
             if not book:
@@ -376,7 +381,7 @@ class AudiobookOrganizer(_PluginBase):
         message = f"批量整理完成：成功 {len(applied)}，失败 {len(errors)}"
         return self._response(
             True,
-            data={"applied": applied, "errors": errors, "mode": mode},
+            data={"applied": applied, "errors": errors, "mode": mode, "force": force_all},
             message=message,
         )
 
@@ -651,8 +656,10 @@ class AudiobookOrganizer(_PluginBase):
             if raw_status != "organized":
                 pending_count += 1
 
+            scrape_label = "重新刮削" if raw_status == "organized" else "刮削整理"
+            local_label = "重新本地整理" if raw_status == "organized" else "本地整理"
             action_buttons: List[dict] = []
-            if raw_status != "organized" and book_id:
+            if book_id:
                 action_buttons = [
                     {
                         "component": "VBtn",
@@ -662,7 +669,7 @@ class AudiobookOrganizer(_PluginBase):
                             "variant": "tonal",
                             "class": "mr-2 mb-1",
                         },
-                        "text": "刮削整理",
+                        "text": scrape_label,
                         "events": {
                             "click": {
                                 "api": f"plugin/{plugin_id}/organize",
@@ -678,7 +685,7 @@ class AudiobookOrganizer(_PluginBase):
                             "variant": "outlined",
                             "class": "mb-1",
                         },
-                        "text": "本地整理",
+                        "text": local_label,
                         "events": {
                             "click": {
                                 "api": f"plugin/{plugin_id}/organize",
@@ -720,8 +727,8 @@ class AudiobookOrganizer(_PluginBase):
                             or [
                                 {
                                     "component": "span",
-                                    "props": {"class": "text-caption text-success"},
-                                    "text": "已整理",
+                                    "props": {"class": "text-caption text-medium-emphasis"},
+                                    "text": "缺少 book_id，请重新扫描",
                                 }
                             ],
                         },
@@ -776,7 +783,7 @@ class AudiobookOrganizer(_PluginBase):
                     },
                     {
                         "component": "VBtn",
-                        "props": {"variant": "outlined", "class": "mb-2"},
+                        "props": {"variant": "outlined", "class": "mr-2 mb-2"},
                         "text": f"全部本地整理（{pending_count}）",
                         "events": {
                             "click": {
@@ -787,6 +794,21 @@ class AudiobookOrganizer(_PluginBase):
                         },
                     },
                 ]
+            )
+        if book_nodes:
+            bulk_buttons.append(
+                {
+                    "component": "VBtn",
+                    "props": {"variant": "text", "class": "mb-2"},
+                    "text": f"全部重新本地整理（{len(book_nodes)}）",
+                    "events": {
+                        "click": {
+                            "api": f"plugin/{plugin_id}/organize_all",
+                            "method": "get",
+                            "params": {"mode": "local", "force": "1"},
+                        }
+                    },
+                }
             )
 
         return [

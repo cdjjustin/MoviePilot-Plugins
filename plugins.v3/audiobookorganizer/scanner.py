@@ -21,7 +21,11 @@ _CN_NUM_RE = re.compile(
     r"[一二三四五六七八九]?十[一二三四五六七八九]?|[一二三四五六七八九]"
 )
 _FNAME_SEASON_RE = re.compile(r"第([一二三四五六七八九十百千万]+|\d+)季")
+_FNAME_SEASON_EP_RE = re.compile(
+    r"第([一二三四五六七八九十百千万]+|\d+)季\s*[-_./]?\s*0*(\d+)"
+)
 _FNAME_EPISODE_RE = re.compile(r"第0*(\d+)集")
+_FNAME_SXXEXX_RE = re.compile(r"S(\d{1,2})E(\d{1,4})", re.IGNORECASE)
 _NAME_JUNK_RE = re.compile(
     r"[\s\-_—\[【（(]+(?:\d+\s*k(?:bps?|b?)?|mp[34]|flac|aac|wav)[\s\]】）)]*$",
     re.IGNORECASE,
@@ -66,16 +70,58 @@ def cn_to_int(cn_text: str) -> int:
 
 
 def parse_season_ep_from_stem(stem: str) -> Tuple[Optional[int], Optional[int]]:
+    """
+    从文件名解析季/集。
+
+    优先级：
+    1. ``第5季-146`` / ``第5季 146``（中文季号 + 紧随集号）
+    2. ``第二季.第002集``
+    3. 仅 ``第002集``（无季号）
+    4. 仅 ``第5季``（集号留给调用方用序号兜底）
+    5. ``S01E12``（无中文季号时才用）
+    """
+    season_ep = _FNAME_SEASON_EP_RE.search(stem)
+    if season_ep:
+        season = cn_to_int(season_ep.group(1))
+        episode = int(season_ep.group(2))
+        if season > 0 and episode > 0:
+            return season, episode
+
     season_m = _FNAME_SEASON_RE.search(stem)
     ep_m = _FNAME_EPISODE_RE.search(stem)
-    if season_m and ep_m:
-        s = cn_to_int(season_m.group(1))
-        e = int(ep_m.group(1))
-        if s > 0 and e > 0:
-            return s, e
-    if ep_m:
-        return None, int(ep_m.group(1))
+    season = cn_to_int(season_m.group(1)) if season_m else None
+    if season is not None and season <= 0:
+        season = None
+    episode = int(ep_m.group(1)) if ep_m else None
+
+    if season and episode:
+        return season, episode
+    if episode:
+        return season, episode
+    if season:
+        return season, None
+
+    sxx = _FNAME_SXXEXX_RE.search(stem)
+    if sxx:
+        return int(sxx.group(1)), int(sxx.group(2))
     return None, None
+
+
+def clean_episode_title(stem: str) -> str:
+    """去掉 SxxExx / 第X季-N / 第N集 等前缀，留下可读集标题。"""
+    title = stem.strip()
+    title = _FNAME_SXXEXX_RE.sub(" ", title, count=1)
+    title = re.sub(r"^\s*[-–—_]\s*", "", title)
+    title = re.sub(
+        r"^.*?(第(?:[一二三四五六七八九十百千万]+|\d+)季\s*[-_./]?\s*0*\d+)\s*",
+        "",
+        title,
+        count=1,
+    )
+    title = re.sub(r"^.*?(第0*\d+集)\s*[.·\-_]?\s*", "", title, count=1)
+    title = re.sub(r"^\d+\s*[-–—_.]\s*", "", title)
+    title = re.sub(r"\s+", " ", title).strip(" .-_—")
+    return title or stem
 
 
 def clean_book_name(name: str) -> str:
@@ -150,7 +196,7 @@ def _collect_audio_files(directory: Path, root_only: bool = False) -> List[Audio
                 relative_path=rel,
                 season=season,
                 episode=episode,
-                episode_title=f.stem,
+                episode_title=clean_episode_title(f.stem),
             )
         )
     return files

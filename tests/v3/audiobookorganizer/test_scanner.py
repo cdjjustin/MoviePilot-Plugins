@@ -53,6 +53,27 @@ def test_parse_season_ep_from_stem():
     assert ep == 2
 
 
+def test_parse_season_ep_chinese_season_with_trailing_number():
+    season, ep = parse_season_ep_from_stem("149-第5季-146 酒肆筹备")
+    assert season == 5
+    assert ep == 146
+
+
+def test_parse_season_ep_prefers_chinese_over_sxxexx_prefix():
+    # 已错误整理成 S01E304 后，仍应从「第5季」恢复正确季/集
+    season, ep = parse_season_ep_from_stem("S01E304 - 149-第5季-146 酒肆筹备")
+    assert season == 5
+    assert ep == 146
+
+
+def test_clean_episode_title_strips_prefixes():
+    from audiobookorganizer.scanner import clean_episode_title
+
+    assert clean_episode_title("S01E304 - 149-第5季-146 酒肆筹备") == "酒肆筹备"
+    assert clean_episode_title("149-第5季-146 酒肆开业") == "酒肆开业"
+    assert clean_episode_title("039.第二季.第002集.秦岭神树") == "秦岭神树"
+
+
 def test_clean_book_name():
     assert clean_book_name("三体 128kbps") == "三体"
     assert clean_book_name("活着 [FLAC]") == "活着"

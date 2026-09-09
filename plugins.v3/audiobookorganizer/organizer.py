@@ -84,7 +84,17 @@ def match_tracks(
 ) -> List[Tuple[object, TrackInfo]]:
     """将本地文件与远程分集列表对齐。"""
     if not tracks:
-        return [(f, TrackInfo(episode=i + 1, title=f.episode_title or f"第{i+1}集")) for i, f in enumerate(files)]
+        # 无远程分集时，优先使用文件名解析出的季/集，避免全部落成 S01E001/E002...
+        return [
+            (
+                f,
+                TrackInfo(
+                    episode=getattr(f, "episode", None) or (i + 1),
+                    title=getattr(f, "episode_title", None) or f"第{(getattr(f, 'episode', None) or i + 1):02d}集",
+                ),
+            )
+            for i, f in enumerate(files)
+        ]
 
     track_by_ep = {t.episode: t for t in tracks}
     matched: List[Tuple[object, TrackInfo]] = []
@@ -143,8 +153,17 @@ def preview_plan(
 
     used_targets: Dict[str, str] = {}
     for audio_file, track in matched:
-        ep = track.episode or audio_file.episode or 1
+        # 文件名里的「第X季」优先于元数据默认季号；集号同理优先本地解析
         ep_season = audio_file.season or season
+        ep = audio_file.episode or track.episode or 1
+        ep_title = track.title
+        if not metadata.tracks and audio_file.episode_title:
+            ep_title = audio_file.episode_title
+        elif audio_file.episode_title and (
+            not ep_title or ep_title.startswith("第") and ep_title.endswith("集")
+        ):
+            ep_title = audio_file.episode_title
+
         target = build_file_path(
             template,
             target_root,
@@ -154,7 +173,7 @@ def preview_plan(
             series=metadata.series or title,
             season=ep_season,
             episode=ep,
-            episode_title=track.title,
+            episode_title=ep_title,
             ext=audio_file.path.suffix,
         )
 
@@ -169,7 +188,7 @@ def preview_plan(
             continue
 
         tags = {
-            "title": track.title,
+            "title": ep_title,
             "author": author,
             "narrator": metadata.narrator,
             "album": title,
