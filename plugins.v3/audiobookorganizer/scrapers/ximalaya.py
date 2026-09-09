@@ -74,24 +74,37 @@ class XimalayaScraper(ScraperBase):
         except Exception:
             return {}
 
-        album = (data.get("data") or {}).get("albumPageMainData") or {}
-        album_data = album.get("album") or album.get("albumInfo") or album
-        if not album_data:
-            album_data = data.get("data") or {}
+        if not isinstance(data, dict):
+            return {}
+        payload = data.get("data")
+        if not isinstance(payload, dict):
+            return {}
+        album_page = payload.get("albumPageMainData")
+        if isinstance(album_page, dict):
+            album_data = album_page.get("album") or album_page.get("albumInfo") or album_page
+        else:
+            # 喜马拉雅部分响应直接把专辑字段放在 data 下。
+            album_data = payload
+        if not isinstance(album_data, dict):
+            return {}
 
         title = album_data.get("albumTitle") or album_data.get("title") or ""
         cover = album_data.get("coverPath") or album_data.get("coverLarge") or ""
+        intro = album_data.get("richIntro") or album_data.get("intro") or ""
+        anchor = album_data.get("anchorName") or album_data.get("nickname") or ""
+        category = album_data.get("categoryTitle") or album_data.get("categoryName") or ""
+        title = title if isinstance(title, str) else ""
+        cover = cover if isinstance(cover, str) else ""
+        intro = intro if isinstance(intro, str) else ""
+        anchor = anchor if isinstance(anchor, str) else ""
+        category = category if isinstance(category, str) else ""
         if cover and cover.startswith("//"):
             cover = "https:" + cover
 
-        intro = album_data.get("richIntro") or album_data.get("intro") or ""
         if intro and "<" in intro:
             from bs4 import BeautifulSoup
 
             intro = BeautifulSoup(intro, "html.parser").get_text("\n", strip=True)
-
-        anchor = album_data.get("anchorName") or album_data.get("nickname") or ""
-        category = album_data.get("categoryTitle") or album_data.get("categoryName") or ""
 
         return {
             "title": title,
@@ -125,19 +138,31 @@ class XimalayaScraper(ScraperBase):
             except Exception:
                 break
 
-            track_list = (data.get("data") or {}).get("tracks") or []
-            if not track_list:
+            if not isinstance(data, dict):
+                break
+            payload = data.get("data")
+            if not isinstance(payload, dict):
+                break
+            track_list = payload.get("tracks") or []
+            if not isinstance(track_list, list) or not track_list:
                 break
 
             for idx, t in enumerate(track_list, start=len(tracks) + 1):
+                if not isinstance(t, dict):
+                    continue
                 title = t.get("title") or t.get("trackTitle") or f"第{idx}集"
+                title = title if isinstance(title, str) else f"第{idx}集"
                 ep = self._parse_episode(title, idx)
                 duration = t.get("duration")
+                try:
+                    duration_value = int(duration) if duration is not None else None
+                except (TypeError, ValueError, OverflowError):
+                    duration_value = None
                 tracks.append(
                     TrackInfo(
                         episode=ep,
                         title=title,
-                        duration=int(duration) if duration else None,
+                        duration=duration_value,
                     )
                 )
 
@@ -151,10 +176,21 @@ class XimalayaScraper(ScraperBase):
 
     def _parse_search_json(self, data: dict, keyword: str) -> List[SearchResult]:
         results: List[SearchResult] = []
-        items = (data.get("data") or {}).get("result") or {}
+        if not isinstance(data, dict):
+            return results
+        payload = data.get("data")
+        if not isinstance(payload, dict):
+            return results
+        items = payload.get("result")
+        if not isinstance(items, dict):
+            return results
         albums = items.get("response") or items.get("docs") or []
+        if not isinstance(albums, list):
+            return results
 
         for item in albums:
+            if not isinstance(item, dict):
+                continue
             album_id = str(item.get("id") or item.get("albumId") or "")
             if not album_id:
                 continue
@@ -162,10 +198,17 @@ class XimalayaScraper(ScraperBase):
             title = item.get("title") or item.get("albumTitle") or ""
             author = item.get("nickname") or item.get("anchorName") or ""
             cover = item.get("cover_path") or item.get("coverPath") or ""
+            title = title if isinstance(title, str) else ""
+            author = author if isinstance(author, str) else ""
+            cover = cover if isinstance(cover, str) else ""
             if cover and cover.startswith("//"):
                 cover = "https:" + cover
 
-            track_count = int(item.get("trackCount") or item.get("include_track_count") or 0)
+            raw_track_count = item.get("trackCount") or item.get("include_track_count") or 0
+            try:
+                track_count = int(raw_track_count)
+            except (TypeError, ValueError, OverflowError):
+                track_count = 0
             score = self._title_score(keyword, title)
 
             results.append(

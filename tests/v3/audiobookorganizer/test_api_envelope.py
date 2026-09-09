@@ -8,7 +8,18 @@ from types import SimpleNamespace
 import pytest
 
 from audiobookorganizer import AudiobookOrganizer
+from audiobookorganizer import _safe_log_text
 from audiobookorganizer.models import AudioFile, BookEntry
+
+
+def test_safe_log_text_removes_control_characters():
+    cleaned = _safe_log_text("book\n\r\t\x1b[2J\x7f")
+
+    assert "\n" not in cleaned
+    assert "\r" not in cleaned
+    assert "\t" not in cleaned
+    assert "\x1b" not in cleaned
+    assert "\x7f" not in cleaned
 
 
 def _is_strict_envelope(payload: dict) -> bool:

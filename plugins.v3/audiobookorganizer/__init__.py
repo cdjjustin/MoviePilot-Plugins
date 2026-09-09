@@ -48,13 +48,24 @@ ORGANIZE_MODE_OPTIONS = [
 ]
 
 
+def _safe_log_text(value: object) -> str:
+    """避免文件名或异常文本中的控制字符伪造日志行。"""
+    text = str(value).replace("\\", "\\\\")
+    return "".join(
+        f"\\x{ord(char):02x}"
+        if ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F
+        else char
+        for char in text
+    )[:500]
+
+
 class AudiobookOrganizer(_PluginBase):
     """有声书刮削整理插件。"""
 
     plugin_name = "有声书刮削整理"
     plugin_desc = "从豆瓣/喜马拉雅刮削元数据，批量整理有声书文件（重命名、目录、标签、封面）"
     plugin_icon = "https://raw.githubusercontent.com/cdjjustin/MoviePilot-Plugins/main/icons/Audiobookshelf_A.png"
-    plugin_version = "3.0.10"
+    plugin_version = "3.0.11"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookorganizer_"
@@ -938,13 +949,25 @@ class AudiobookOrganizer(_PluginBase):
         auto_applied: List[str] = []
 
         for book in books:
-            results = self._search_all(book.name)
+            try:
+                results = self._search_all(book.name)
+            except Exception as exc:
+                logger.warning(
+                    f"[AudiobookOrganizer] 刮削《{_safe_log_text(book.name)}》失败，改用本地信息：{_safe_log_text(exc)}"
+                )
+                results = []
             metadata: Optional[AudiobookMetadata] = None
             used_local_fallback = False
 
             if results:
                 best = results[0]
-                metadata = self._fetch_metadata(best.source, best.source_id)
+                try:
+                    metadata = self._fetch_metadata(best.source, best.source_id)
+                except Exception as exc:
+                    logger.warning(
+                        f"[AudiobookOrganizer] 获取《{_safe_log_text(book.name)}》元数据失败，改用本地信息：{_safe_log_text(exc)}"
+                    )
+                    metadata = None
 
             metadata, used_local_fallback = resolve_metadata(
                 book,
