@@ -53,7 +53,7 @@ class AudiobookOrganizer(_PluginBase):
     plugin_name = "有声书刮削整理"
     plugin_desc = "从豆瓣/喜马拉雅刮削元数据，批量整理有声书文件（重命名、目录、标签、封面）"
     plugin_icon = "https://raw.githubusercontent.com/cdjjustin/MoviePilot-Plugins/main/icons/Audiobookshelf_A.png"
-    plugin_version = "3.0.4"
+    plugin_version = "3.0.5"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookorganizer_"
@@ -179,6 +179,24 @@ class AudiobookOrganizer(_PluginBase):
                 "description": "返回最近的整理操作记录",
                 "response_model": response_model,
             },
+            {
+                "path": "/organize",
+                "endpoint": self.api_organize,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "手动整理单本",
+                "description": "按刮削结果或本地目录名整理指定有声书",
+                "response_model": response_model,
+            },
+            {
+                "path": "/organize_all",
+                "endpoint": self.api_organize_all,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "批量手动整理",
+                "description": "整理上次扫描中的全部待整理有声书",
+                "response_model": response_model,
+            },
         ]
 
     @staticmethod
@@ -290,6 +308,77 @@ class AudiobookOrganizer(_PluginBase):
     def api_history(self, limit: int = 20) -> schemas.Response[Dict[str, Any]]:
         history = self.get_data("organize_history") or []
         return self._response(True, data={"history": history[:limit]})
+
+    def api_organize(
+        self,
+        book_id: str = "",
+        mode: str = "scrape",
+    ) -> schemas.Response[Dict[str, Any]]:
+        if not self._enabled:
+            raise HTTPException(status_code=503, detail="插件未启用")
+        if not self._source_path:
+            raise HTTPException(status_code=400, detail="未配置源目录")
+
+        book_id = (book_id or "").strip()
+        mode = (mode or "scrape").strip().lower()
+        if mode not in {"scrape", "local"}:
+            raise HTTPException(status_code=400, detail="mode 仅支持 scrape 或 local")
+        if not book_id:
+            raise HTTPException(status_code=400, detail="缺少 book_id")
+
+        book = self._find_book(book_id)
+        if not book:
+            raise HTTPException(status_code=404, detail="未找到对应书籍，请先扫描目录")
+
+        result = self._organize_book(book, mode=mode)
+        if not result.get("ok"):
+            return self._response(False, data=result, message=result.get("error") or "整理失败")
+
+        label = "本地信息" if result.get("local") else "刮削元数据"
+        return self._response(
+            True,
+            data=result,
+            message=f"《{result.get('book')}》已按{label}整理为《{result.get('title')}》",
+        )
+
+    def api_organize_all(self, mode: str = "local") -> schemas.Response[Dict[str, Any]]:
+        if not self._enabled:
+            raise HTTPException(status_code=503, detail="插件未启用")
+        if not self._source_path:
+            raise HTTPException(status_code=400, detail="未配置源目录")
+
+        mode = (mode or "local").strip().lower()
+        if mode not in {"scrape", "local"}:
+            raise HTTPException(status_code=400, detail="mode 仅支持 scrape 或 local")
+
+        last_scan = self.get_data("last_scan") or {}
+        books_data = last_scan.get("books") or []
+        if not books_data:
+            return self._response(False, message="没有可整理的书籍，请先扫描目录")
+
+        applied: List[Dict[str, Any]] = []
+        errors: List[Dict[str, Any]] = []
+        for item in books_data:
+            if not isinstance(item, dict):
+                continue
+            if item.get("status") == "organized":
+                continue
+            book = self._find_book(item.get("book_id") or "")
+            if not book:
+                errors.append({"book": item.get("name"), "error": "书籍不存在"})
+                continue
+            result = self._organize_book(book, mode=mode)
+            if result.get("ok"):
+                applied.append(result)
+            else:
+                errors.append(result)
+
+        message = f"批量整理完成：成功 {len(applied)}，失败 {len(errors)}"
+        return self._response(
+            True,
+            data={"applied": applied, "errors": errors, "mode": mode},
+            message=message,
+        )
 
     # ──────────────────────────── 配置表单 ────────────────────────────
 
@@ -539,6 +628,7 @@ class AudiobookOrganizer(_PluginBase):
         last_scan = self.get_data("last_scan") or {}
         books = last_scan.get("books", [])
         history = (self.get_data("organize_history") or [])[:5]
+        plugin_id = self.__class__.__name__
 
         # PageRender 会向组件默认插槽写入子节点；VDataTable/VList 的 items 属性和
         # 默认插槽冲突时只显示分页不显示行。改用 content 显式渲染列表项。
@@ -549,20 +639,93 @@ class AudiobookOrganizer(_PluginBase):
             "failed": "失败",
         }
         book_nodes: List[dict] = []
+        pending_count = 0
         for item in books:
             if not isinstance(item, dict):
                 continue
             name = item.get("name") or "未命名"
+            book_id = item.get("book_id") or ""
             file_count = item.get("file_count", len(item.get("files") or []))
-            status = status_label.get(item.get("status", "pending"), item.get("status", "pending"))
+            raw_status = item.get("status", "pending")
+            status = status_label.get(raw_status, raw_status)
+            if raw_status != "organized":
+                pending_count += 1
+
+            action_buttons: List[dict] = []
+            if raw_status != "organized" and book_id:
+                action_buttons = [
+                    {
+                        "component": "VBtn",
+                        "props": {
+                            "size": "small",
+                            "color": "primary",
+                            "variant": "tonal",
+                            "class": "mr-2 mb-1",
+                        },
+                        "text": "刮削整理",
+                        "events": {
+                            "click": {
+                                "api": f"plugin/{plugin_id}/organize",
+                                "method": "get",
+                                "params": {"book_id": book_id, "mode": "scrape"},
+                            }
+                        },
+                    },
+                    {
+                        "component": "VBtn",
+                        "props": {
+                            "size": "small",
+                            "variant": "outlined",
+                            "class": "mb-1",
+                        },
+                        "text": "本地整理",
+                        "events": {
+                            "click": {
+                                "api": f"plugin/{plugin_id}/organize",
+                                "method": "get",
+                                "params": {"book_id": book_id, "mode": "local"},
+                            }
+                        },
+                    },
+                ]
+
             book_nodes.append(
                 {
-                    "component": "VListItem",
+                    "component": "VSheet",
                     "props": {
-                        "title": name,
-                        "subtitle": f"{file_count} 个文件 · {status}",
-                        "lines": "two",
+                        "class": "d-flex flex-wrap align-center justify-space-between ga-2 py-3 px-1 border-b",
+                        "color": "transparent",
                     },
+                    "content": [
+                        {
+                            "component": "div",
+                            "props": {"class": "flex-grow-1", "style": "min-width: 14rem;"},
+                            "content": [
+                                {
+                                    "component": "div",
+                                    "props": {"class": "text-body-1 font-weight-medium"},
+                                    "text": name,
+                                },
+                                {
+                                    "component": "div",
+                                    "props": {"class": "text-caption text-medium-emphasis"},
+                                    "text": f"{file_count} 个文件 · {status}",
+                                },
+                            ],
+                        },
+                        {
+                            "component": "div",
+                            "props": {"class": "d-flex flex-wrap align-center"},
+                            "content": action_buttons
+                            or [
+                                {
+                                    "component": "span",
+                                    "props": {"class": "text-caption text-success"},
+                                    "text": "已整理",
+                                }
+                            ],
+                        },
+                    ],
                 }
             )
 
@@ -581,6 +744,49 @@ class AudiobookOrganizer(_PluginBase):
                         "lines": "two",
                     },
                 }
+            )
+
+        bulk_buttons: List[dict] = [
+            {
+                "component": "VBtn",
+                "props": {"color": "primary", "class": "mr-2 mb-2"},
+                "text": "扫描目录",
+                "events": {
+                    "click": {
+                        "api": f"plugin/{plugin_id}/scan",
+                        "method": "get",
+                    }
+                },
+            },
+        ]
+        if pending_count:
+            bulk_buttons.extend(
+                [
+                    {
+                        "component": "VBtn",
+                        "props": {"color": "secondary", "variant": "tonal", "class": "mr-2 mb-2"},
+                        "text": f"全部刮削整理（{pending_count}）",
+                        "events": {
+                            "click": {
+                                "api": f"plugin/{plugin_id}/organize_all",
+                                "method": "get",
+                                "params": {"mode": "scrape"},
+                            }
+                        },
+                    },
+                    {
+                        "component": "VBtn",
+                        "props": {"variant": "outlined", "class": "mb-2"},
+                        "text": f"全部本地整理（{pending_count}）",
+                        "events": {
+                            "click": {
+                                "api": f"plugin/{plugin_id}/organize_all",
+                                "method": "get",
+                                "params": {"mode": "local"},
+                            }
+                        },
+                    },
+                ]
             )
 
         return [
@@ -602,19 +808,19 @@ class AudiobookOrganizer(_PluginBase):
                                         "component": "VCardText",
                                         "content": [
                                             {
-                                                "component": "VBtn",
-                                                "props": {"color": "primary", "class": "mr-2"},
-                                                "text": "扫描目录",
-                                                "events": {
-                                                    "click": {
-                                                        "api": f"plugin/{self.__class__.__name__}/scan",
-                                                        "method": "get",
-                                                    }
-                                                },
+                                                "component": "div",
+                                                "props": {"class": "mb-2"},
+                                                "content": bulk_buttons,
                                             },
                                             {
-                                                "component": "span",
+                                                "component": "div",
+                                                "props": {"class": "text-body-2 text-medium-emphasis mb-1"},
                                                 "text": f"上次扫描：{last_scan.get('time', '从未')}，共 {last_scan.get('count', 0)} 本",
+                                            },
+                                            {
+                                                "component": "div",
+                                                "props": {"class": "text-caption text-medium-emphasis"},
+                                                "text": "刮削整理：先搜豆瓣/喜马拉雅再整理；本地整理：按目录名整理（适合已命名好的做种目录）。",
                                             },
                                         ],
                                     },
@@ -640,17 +846,12 @@ class AudiobookOrganizer(_PluginBase):
                                     },
                                     {
                                         "component": "VCardText",
-                                        "content": [
+                                        "content": book_nodes
+                                        or [
                                             {
-                                                "component": "VList",
-                                                "props": {"lines": "two", "class": "py-0"},
-                                                "content": book_nodes,
-                                            }
-                                            if book_nodes
-                                            else {
                                                 "component": "span",
                                                 "text": "暂无待整理书籍，请先扫描目录",
-                                            },
+                                            }
                                         ],
                                     },
                                 ],
@@ -771,6 +972,84 @@ class AudiobookOrganizer(_PluginBase):
                 text="\n".join(notify_lines) + "\n\n请到插件详情页手动确认整理。",
                 mtype=NotificationType.Manual,
             )
+
+    def _organize_book(self, book: BookEntry, *, mode: str = "scrape") -> Dict[str, Any]:
+        """手动整理单本。mode=scrape 先刮削；mode=local 仅用目录名。"""
+        metadata: Optional[AudiobookMetadata] = None
+        used_local_fallback = False
+
+        if mode == "scrape":
+            results = self._search_all(book.name)
+            if results:
+                best = results[0]
+                metadata = self._fetch_metadata(best.source, best.source_id)
+            metadata, used_local_fallback = resolve_metadata(
+                book,
+                metadata,
+                local_fallback=self._local_fallback_enabled,
+            )
+        else:
+            metadata, used_local_fallback = resolve_metadata(
+                book,
+                None,
+                local_fallback=True,
+            )
+
+        if not metadata or not metadata.title:
+            self._update_book_status(book.book_id, "failed")
+            return {
+                "ok": False,
+                "book": book.name,
+                "book_id": book.book_id,
+                "error": "无可用元数据",
+            }
+
+        source_root = Path(self._source_path)
+        target_root = Path(self._target_path or self._source_path)
+        plan = preview_plan(
+            book,
+            metadata,
+            source_root=source_root,
+            target_root=target_root,
+            template=self._naming_template,
+            organize_mode=self._organize_mode,
+        )
+        result = apply_plan(
+            plan,
+            target_root=target_root,
+            cover_url=metadata.cover_url,
+            organize_mode=self._organize_mode,
+        )
+        self._append_history(plan, result)
+        self._update_book_status(book.book_id, "organized")
+        return {
+            "ok": True,
+            "book": book.name,
+            "book_id": book.book_id,
+            "title": metadata.title,
+            "local": used_local_fallback or mode == "local",
+            "mode": mode,
+            "plan_id": plan.plan_id,
+            "result": result,
+        }
+
+    def _update_book_status(self, book_id: str, status: str) -> None:
+        last_scan = self.get_data("last_scan") or {}
+        books = last_scan.get("books") or []
+        changed = False
+        for item in books:
+            if isinstance(item, dict) and item.get("book_id") == book_id:
+                item["status"] = status
+                changed = True
+                break
+        if changed:
+            last_scan["books"] = books
+            self.save_data("last_scan", last_scan)
+
+        for book in self._books_cache:
+            if book.book_id == book_id:
+                book.status = status
+                break
 
     def _search_all(self, keyword: str) -> List[SearchResult]:
         results: List[SearchResult] = []
