@@ -74,6 +74,14 @@ def test_clean_episode_title_strips_prefixes():
     assert clean_episode_title("039.第二季.第002集.秦岭神树") == "秦岭神树"
 
 
+def test_is_extra_track():
+    from audiobookorganizer.scanner import is_extra_track
+
+    assert is_extra_track("【主题曲】少年无恙 - 周笔畅")
+    assert is_extra_track("【插曲】一步天涯")
+    assert not is_extra_track("第1集 局中挣扎")
+
+
 def test_clean_book_name():
     assert clean_book_name("三体 128kbps") == "三体"
     assert clean_book_name("活着 [FLAC]") == "活着"

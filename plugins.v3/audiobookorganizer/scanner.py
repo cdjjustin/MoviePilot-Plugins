@@ -26,6 +26,11 @@ _FNAME_SEASON_EP_RE = re.compile(
 )
 _FNAME_EPISODE_RE = re.compile(r"第0*(\d+)集")
 _FNAME_SXXEXX_RE = re.compile(r"S(\d{1,2})E(\d{1,4})", re.IGNORECASE)
+_EXTRA_TRACK_RE = re.compile(
+    r"(?:【[^】]*(?:主题曲|片头曲|片尾曲|插曲|片头|片尾|预告|花絮|广告|彩蛋|BONUS|OP|ED)[^】]*】)"
+    r"|(?:^|[\s\-_.．])(?:主题曲|片头曲|片尾曲|插曲|片头|片尾|预告|花絮|广告|彩蛋)(?:$|[\s\-_.．])",
+    re.IGNORECASE,
+)
 _NAME_JUNK_RE = re.compile(
     r"[\s\-_—\[【（(]+(?:\d+\s*k(?:bps?|b?)?|mp[34]|flac|aac|wav)[\s\]】）)]*$",
     re.IGNORECASE,
@@ -124,6 +129,11 @@ def clean_episode_title(stem: str) -> str:
     return title or stem
 
 
+def is_extra_track(name: str) -> bool:
+    """主题曲/插曲/片头片尾等附属音轨。"""
+    return bool(_EXTRA_TRACK_RE.search(name or ""))
+
+
 def clean_book_name(name: str) -> str:
     return _NAME_JUNK_RE.sub("", name).strip()
 
@@ -188,8 +198,10 @@ def _collect_audio_files(directory: Path, root_only: bool = False) -> List[Audio
     for idx, f in enumerate(audio_paths, start=1):
         rel = str(f.relative_to(directory)).replace("\\", "/")
         season, episode = parse_season_ep_from_stem(f.stem)
-        if episode is None:
-            episode = idx
+        if is_extra_track(f.stem):
+            # 附属音轨单独进 S00，避免和「第N集」抢同一集号
+            season = 0
+            episode = None
         files.append(
             AudioFile(
                 path=f,

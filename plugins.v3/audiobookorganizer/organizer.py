@@ -13,6 +13,7 @@ import httpx
 
 from .models import AudiobookMetadata, BookEntry, FileChange, OrganizePlan, TrackInfo
 from .namer import build_file_path, sanitize_name
+from .scanner import is_extra_track
 from .tagger import save_cover, write_tags
 
 
@@ -84,7 +85,7 @@ def match_tracks(
 ) -> List[Tuple[object, TrackInfo]]:
     """将本地文件与远程分集列表对齐。"""
     if not tracks:
-        # 无远程分集时，优先使用文件名解析出的季/集，避免全部落成 S01E001/E002...
+        # 无远程分集时保留文件名信息；最终季/集号由 assign_unique_episodes 统一分配
         return [
             (
                 f,
@@ -109,6 +110,78 @@ def match_tracks(
         matched.append((f, track))
 
     return matched
+
+
+def assign_unique_episodes(
+    matched: List[Tuple[object, TrackInfo]],
+    *,
+    default_season: int = 1,
+) -> List[Tuple[object, TrackInfo, int, int]]:
+    """
+    为每个文件分配不重复的 (season, episode)。
+
+    - 主题曲/插曲等附属音轨 → S00E01, S00E02...
+    - 正集：若解析出的集号互不冲突则沿用；否则按文件顺序在季内顺排
+    """
+    extras: List[Tuple[object, TrackInfo]] = []
+    regular: List[Tuple[object, TrackInfo]] = []
+    for audio_file, track in matched:
+        stem = getattr(audio_file, "path", None)
+        stem_name = stem.stem if stem is not None else ""
+        title = getattr(audio_file, "episode_title", None) or track.title or ""
+        if getattr(audio_file, "season", None) == 0 or is_extra_track(stem_name) or is_extra_track(title):
+            extras.append((audio_file, track))
+        else:
+            regular.append((audio_file, track))
+
+    assigned: List[Tuple[object, TrackInfo, int, int]] = []
+    used: set[Tuple[int, int]] = set()
+
+    extra_ep = 1
+    for audio_file, track in extras:
+        while (0, extra_ep) in used:
+            extra_ep += 1
+        used.add((0, extra_ep))
+        assigned.append((audio_file, track, 0, extra_ep))
+        extra_ep += 1
+
+    parsed_rows: List[Tuple[object, TrackInfo, int, Optional[int]]] = []
+    for audio_file, track in regular:
+        season = getattr(audio_file, "season", None) or default_season
+        episode = getattr(audio_file, "episode", None)
+        parsed_rows.append((audio_file, track, season, episode))
+
+    parsed_eps = [ep for *_, ep in parsed_rows if ep is not None]
+    unique_ok = (
+        len(parsed_rows) > 0
+        and len(parsed_eps) == len(parsed_rows)
+        and len(parsed_eps) == len(set(parsed_eps))
+    )
+
+    if unique_ok:
+        for audio_file, track, season, episode in parsed_rows:
+            assert episode is not None
+            ep = episode
+            while (season, ep) in used:
+                ep += 1
+            used.add((season, ep))
+            assigned.append((audio_file, track, season, ep))
+    else:
+        # 多段同「第N集」或缺少集号：按播放顺序在季内分配唯一集号
+        season_counters: Dict[int, int] = {}
+        for audio_file, track, season, _episode in parsed_rows:
+            season_counters[season] = season_counters.get(season, 0) + 1
+            ep = season_counters[season]
+            while (season, ep) in used:
+                ep += 1
+                season_counters[season] = ep
+            used.add((season, ep))
+            assigned.append((audio_file, track, season, ep))
+
+    # 保持原文件顺序输出
+    order = {id(audio_file): idx for idx, (audio_file, _) in enumerate(matched)}
+    assigned.sort(key=lambda row: order.get(id(row[0]), 10**9))
+    return assigned
 
 
 def preview_plan(
@@ -151,11 +224,12 @@ def preview_plan(
             f"远程分集数({len(metadata.tracks)})与本地文件数({len(book.files)})不一致"
         )
 
+    assigned = assign_unique_episodes(matched, default_season=season)
+    if any(ep_season == 0 for _, _, ep_season, _ in assigned):
+        warnings.append("已将主题曲/插曲等附属音轨整理到 S00，避免与正集集号冲突")
+
     used_targets: Dict[str, str] = {}
-    for audio_file, track in matched:
-        # 文件名里的「第X季」优先于元数据默认季号；集号同理优先本地解析
-        ep_season = audio_file.season or season
-        ep = audio_file.episode or track.episode or 1
+    for audio_file, track, ep_season, ep in assigned:
         ep_title = track.title
         if not metadata.tracks and audio_file.episode_title:
             ep_title = audio_file.episode_title
