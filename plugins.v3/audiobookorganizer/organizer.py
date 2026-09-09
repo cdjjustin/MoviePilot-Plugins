@@ -13,7 +13,7 @@ import httpx
 
 from .models import AudiobookMetadata, BookEntry, FileChange, OrganizePlan, TrackInfo
 from .namer import build_file_path, sanitize_name
-from .scanner import is_extra_track
+from .scanner import is_extra_track, resolve_season_episode
 from .tagger import save_cover, write_tags
 
 
@@ -121,7 +121,8 @@ def assign_unique_episodes(
     为每个文件分配不重复的 (season, episode)。
 
     - 主题曲/插曲等附属音轨 → S00E01, S00E02...
-    - 正集：若解析出的集号互不冲突则沿用；否则按文件顺序在季内顺排
+    - 正集：若 (季,集) 互不冲突则沿用解析值；否则按文件顺序在季内顺排
+    - 会二次从标题/路径解析「第二季-015」，避免已错标成 S01 后丢季号
     """
     extras: List[Tuple[object, TrackInfo]] = []
     regular: List[Tuple[object, TrackInfo]] = []
@@ -147,15 +148,35 @@ def assign_unique_episodes(
 
     parsed_rows: List[Tuple[object, TrackInfo, int, Optional[int]]] = []
     for audio_file, track in regular:
-        season = getattr(audio_file, "season", None) or default_season
-        episode = getattr(audio_file, "episode", None)
+        path = getattr(audio_file, "path", None)
+        rel = getattr(audio_file, "relative_path", "") or ""
+        texts = [
+            getattr(path, "stem", None) or "",
+            getattr(audio_file, "episode_title", None) or "",
+            track.title or "",
+            *Path(rel).parts[:-1],
+            *(list(getattr(path, "parts", ()))[-3:-1] if path is not None else []),
+        ]
+        # 不把 file 上可能错误的 season/episode 当作初值，避免挡住标题里的「第二季-015」
+        season, episode = resolve_season_episode(*texts)
+        if season is None:
+            season = getattr(audio_file, "season", None)
+        if episode is None:
+            episode = getattr(audio_file, "episode", None)
+        if season is None:
+            season = default_season
         parsed_rows.append((audio_file, track, season, episode))
 
-    parsed_eps = [ep for *_, ep in parsed_rows if ep is not None]
+    # 按 (季, 集) 判重：跨季允许出现相同集号（S01E15 与 S02E15 都合法）
+    pair_list = [
+        (season, episode)
+        for _, _, season, episode in parsed_rows
+        if episode is not None
+    ]
     unique_ok = (
         len(parsed_rows) > 0
-        and len(parsed_eps) == len(parsed_rows)
-        and len(parsed_eps) == len(set(parsed_eps))
+        and len(pair_list) == len(parsed_rows)
+        and len(pair_list) == len(set(pair_list))
     )
 
     if unique_ok:
@@ -167,9 +188,14 @@ def assign_unique_episodes(
             used.add((season, ep))
             assigned.append((audio_file, track, season, ep))
     else:
-        # 多段同「第N集」或缺少集号：按播放顺序在季内分配唯一集号
+        # 同季多段冲突或缺少集号：优先保留已解析集号，冲突再顺延
         season_counters: Dict[int, int] = {}
-        for audio_file, track, season, _episode in parsed_rows:
+        for audio_file, track, season, episode in parsed_rows:
+            if episode is not None and (season, episode) not in used:
+                used.add((season, episode))
+                season_counters[season] = max(season_counters.get(season, 0), episode)
+                assigned.append((audio_file, track, season, episode))
+                continue
             season_counters[season] = season_counters.get(season, 0) + 1
             ep = season_counters[season]
             while (season, ep) in used:
