@@ -1,5 +1,6 @@
 """整理模块测试。"""
 
+import os
 import sys
 from pathlib import Path
 
@@ -140,19 +141,64 @@ def test_resolve_metadata_without_fallback(sample_book):
     assert meta.title == ""
 
 
-def test_preview_plan_local_metadata_only(sample_book, tmp_path: Path):
-    target = tmp_path / "output"
-    local_meta = build_local_metadata(sample_book)
+def test_cleanup_previous_outputs_removes_hardlinks_and_keeps_source(tmp_path: Path):
+    from audiobookorganizer.organizer import cleanup_previous_outputs
+
+    source_root = tmp_path / "seed"
+    target_root = tmp_path / "library"
+    source_root.mkdir()
+    target_root.mkdir()
+    src = source_root / "ep.mp3"
+    src.write_bytes(b"audio")
+    old = target_root / "作者" / "书名" / "S01E304 - old.mp3"
+    old.parent.mkdir(parents=True)
+    os.link(src, old)
+    assert old.exists()
+    assert src.stat().st_nlink >= 2
+
+    result = cleanup_previous_outputs(
+        target_root=target_root,
+        source_paths=[src],
+        previous_targets=[str(old)],
+    )
+    assert result["deleted_count"] >= 1
+    assert not old.exists()
+    assert src.exists()
+    assert src.read_bytes() == b"audio"
+
+
+def test_preview_plan_uses_filename_season_episode(tmp_path: Path):
+    book_dir = tmp_path / "剑来"
+    book_dir.mkdir()
+    src = book_dir / "S01E304 - 149-第5季-146 酒肆筹备.mp3"
+    src.write_bytes(b"ID3" + b"\x00" * 100)
+    book = BookEntry(
+        book_id="jianlai",
+        name="剑来",
+        path=book_dir,
+        files=[
+            AudioFile(
+                path=src,
+                relative_path=src.name,
+                season=5,
+                episode=146,
+                episode_title="酒肆筹备",
+            )
+        ],
+    )
+    target = tmp_path / "out"
     plan = preview_plan(
-        sample_book,
-        local_meta,
-        source_root=sample_book.path.parent,
+        book,
+        build_local_metadata(book),
+        source_root=tmp_path,
         target_root=target,
         organize_mode="hardlink",
     )
-    assert len(plan.changes) == 3
-    assert any("未知作者" in c.target for c in plan.changes)
-    assert any("三体" in c.target for c in plan.changes)
+    assert len(plan.changes) == 1
+    assert "S05E146" in plan.changes[0].target
+    assert "酒肆筹备" in plan.changes[0].target
+    assert "S01E304" not in plan.changes[0].target
+
 
 
 def test_apply_plan_hardlink_keeps_source(sample_book, sample_metadata, tmp_path: Path):
