@@ -131,6 +131,62 @@ def test_ximalaya_search(mock_client_cls):
     assert results[0].track_count == 50
 
 
+def test_ximalaya_search_supports_response_docs_envelope():
+    scraper = XimalayaScraper()
+    data = {
+        "data": {
+            "result": {
+                "response": {
+                    "docs": [
+                        {
+                            "id": "98765",
+                            "title": "《剑来》上 | 原文无删减&大斌",
+                            "nickname": "大斌",
+                            "trackCount": 100,
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    results = scraper._parse_search_json(data, "剑来")
+
+    assert len(results) == 1
+    assert results[0].source_id == "98765"
+    assert results[0].title == "《剑来》上 | 原文无删减&大斌"
+    assert results[0].track_count == 100
+
+
+def test_ximalaya_search_supports_result_docs_envelope():
+    data = {
+        "data": {
+            "result": {
+                "docs": [{"id": "54321", "title": "剑来", "trackCount": 10}]
+            }
+        }
+    }
+
+    results = XimalayaScraper()._parse_search_json(data, "剑来")
+
+    assert [result.source_id for result in results] == ["54321"]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"docs": "unexpected"},
+        {"docs": {"id": "123"}},
+        {"docs": None},
+        {"docs": "unexpected", "response": [{"id": "123", "title": "误入结果"}]},
+    ],
+)
+def test_ximalaya_search_ignores_non_list_response_docs(response):
+    data = {"data": {"result": {"response": response}}}
+
+    assert XimalayaScraper()._parse_search_json(data, "剑来") == []
+
+
 @patch("audiobookorganizer.scrapers.ximalaya.httpx.Client")
 def test_ximalaya_fetch(mock_client_cls):
     def _get(url, **kwargs):

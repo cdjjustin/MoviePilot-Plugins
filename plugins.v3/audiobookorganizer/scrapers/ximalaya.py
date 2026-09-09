@@ -184,7 +184,11 @@ class XimalayaScraper(ScraperBase):
         items = payload.get("result")
         if not isinstance(items, dict):
             return results
-        albums = items.get("response") or items.get("docs") or []
+        response = items.get("response")
+        if isinstance(response, dict):
+            albums = response.get("docs") or []
+        else:
+            albums = response or items.get("docs") or []
         if not isinstance(albums, list):
             return results
 
