@@ -57,7 +57,7 @@ class AudiobookOrganizer(_PluginBase):
     plugin_name = "有声书刮削整理"
     plugin_desc = "从豆瓣/喜马拉雅刮削元数据，批量整理有声书文件（重命名、目录、标签、封面）"
     plugin_icon = "Audiobookshelf_A.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookorganizer_"
@@ -128,6 +128,11 @@ class AudiobookOrganizer(_PluginBase):
                 }
             ]
         return []
+
+    def stop_service(self) -> None:
+        """释放插件后台资源；宿主会按 get_service() 注销定时任务。"""
+        self._enabled = False
+        self._monitor_enabled = False
 
     # ──────────────────────────── API ────────────────────────────
 
