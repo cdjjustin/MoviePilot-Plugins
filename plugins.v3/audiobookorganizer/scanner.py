@@ -14,18 +14,26 @@ AUDIO_EXTENSIONS = frozenset(
 )
 
 _CN_DIGIT_MAP: Dict[str, int] = {
+    "零": 0, "〇": 0, "两": 2,
     "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
     "六": 6, "七": 7, "八": 8, "九": 9,
 }
 _CN_NUM_RE = re.compile(
-    r"[一二三四五六七八九]?十[一二三四五六七八九]?|[一二三四五六七八九]"
+    r"[一二三四五六七八九两]?十[一二三四五六七八九]?|[一二三四五六七八九两零〇]"
 )
-_FNAME_SEASON_RE = re.compile(r"第([一二三四五六七八九十百千万]+|\d+)季")
+_SEP_CLASS = r"[-_./．—–－〜~]"
+_FNAME_SEASON_RE = re.compile(
+    rf"第\s*([一二三四五六七八九十百千万两零〇]+|\d+)\s*季"
+)
 _FNAME_SEASON_EP_RE = re.compile(
-    r"第([一二三四五六七八九十百千万]+|\d+)季\s*[-_./]?\s*0*(\d+)"
+    rf"第\s*([一二三四五六七八九十百千万两零〇]+|\d+)\s*季\s*{_SEP_CLASS}?\s*(?:第\s*)?0*(\d+)\s*(?:集)?"
 )
-_FNAME_EPISODE_RE = re.compile(r"第0*(\d+)集")
+_FNAME_EPISODE_RE = re.compile(r"第\s*0*(\d+)\s*集")
 _FNAME_SXXEXX_RE = re.compile(r"S(\d{1,2})E(\d{1,4})", re.IGNORECASE)
+_DIR_SEASON_RE = re.compile(
+    r"(?i)(?:^|[\s_\-.(（【])(?:season|s|se)[\s._-]*0*(\d{1,2})(?:$|[\s_\-.)）】])"
+)
+_LEADING_EP_RE = re.compile(rf"^(?:.*{_SEP_CLASS})?0*(\d{{1,4}})(?:\s*{_SEP_CLASS}|\s+|$)")
 _EXTRA_TRACK_RE = re.compile(
     r"(?:【[^】]*(?:主题曲|片头曲|片尾曲|插曲|片头|片尾|预告|花絮|广告|彩蛋|BONUS|OP|ED)[^】]*】)"
     r"|(?:^|[\s\-_.．])(?:主题曲|片头曲|片尾曲|插曲|片头|片尾|预告|花絮|广告|彩蛋)(?:$|[\s\-_.．])",
@@ -79,25 +87,33 @@ def parse_season_ep_from_stem(stem: str) -> Tuple[Optional[int], Optional[int]]:
     从文件名解析季/集。
 
     优先级：
-    1. ``第5季-146`` / ``第5季 146``（中文季号 + 紧随集号）
+    1. ``第5季-146`` / ``第二季-015``（中文季号 + 紧随集号，含全角横线）
     2. ``第二季.第002集``
     3. 仅 ``第002集``（无季号）
-    4. 仅 ``第5季``（集号留给调用方用序号兜底）
-    5. ``S01E12``（无中文季号时才用）
+    4. 仅 ``第5季``（集号可再从前置数字推断）
+    5. ``S01E12``（无中文季号时才用；若同名已有「第X季」则以中文为准）
     """
-    season_ep = _FNAME_SEASON_EP_RE.search(stem)
+    text = stem or ""
+    season_ep = _FNAME_SEASON_EP_RE.search(text)
     if season_ep:
         season = cn_to_int(season_ep.group(1))
         episode = int(season_ep.group(2))
         if season > 0 and episode > 0:
             return season, episode
 
-    season_m = _FNAME_SEASON_RE.search(stem)
-    ep_m = _FNAME_EPISODE_RE.search(stem)
+    season_m = _FNAME_SEASON_RE.search(text)
+    ep_m = _FNAME_EPISODE_RE.search(text)
     season = cn_to_int(season_m.group(1)) if season_m else None
     if season is not None and season <= 0:
         season = None
     episode = int(ep_m.group(1)) if ep_m else None
+
+    if season and episode is None:
+        # 「第二季-015」若因特殊字符没命中组合正则，尝试季号后再取数字
+        after = text[season_m.end():] if season_m else ""
+        trailing = re.match(rf"^\s*{_SEP_CLASS}?\s*0*(\d{{1,4}})", after)
+        if trailing:
+            episode = int(trailing.group(1))
 
     if season and episode:
         return season, episode
@@ -106,10 +122,63 @@ def parse_season_ep_from_stem(stem: str) -> Tuple[Optional[int], Optional[int]]:
     if season:
         return season, None
 
-    sxx = _FNAME_SXXEXX_RE.search(stem)
+    sxx = _FNAME_SXXEXX_RE.search(text)
     if sxx:
         return int(sxx.group(1)), int(sxx.group(2))
     return None, None
+
+
+def parse_season_from_dirname(name: str) -> Optional[int]:
+    """从目录名解析季号：第二季 / Season 2 / S02。"""
+    text = name or ""
+    season_m = _FNAME_SEASON_RE.search(text)
+    if season_m:
+        season = cn_to_int(season_m.group(1))
+        if season > 0:
+            return season
+    dir_m = _DIR_SEASON_RE.search(f" {text} ")
+    if dir_m:
+        season = int(dir_m.group(1))
+        if season > 0:
+            return season
+    return None
+
+
+def resolve_season_episode(
+    *texts: str,
+    season: Optional[int] = None,
+    episode: Optional[int] = None,
+) -> Tuple[Optional[int], Optional[int]]:
+    """
+    从多个文本片段补全季/集（文件名、标题、目录名）。
+
+    文本中的完整「第二季-015」/「S02E15」优先于传入的 season/episode
+    （避免刮削对齐或旧 S01 前缀把后续季锁死在第一季）。
+    """
+    found_season: Optional[int] = None
+    found_episode: Optional[int] = None
+
+    for text in texts:
+        if not text:
+            continue
+        parsed_season, parsed_episode = parse_season_ep_from_stem(text)
+        # 完整季+集：直接采用（中文季号优先于同名里的 S01Exx）
+        if parsed_season is not None and parsed_episode is not None:
+            return parsed_season, parsed_episode
+        if found_season is None and parsed_season is not None:
+            found_season = parsed_season
+        if found_episode is None and parsed_episode is not None:
+            found_episode = parsed_episode
+        if found_season is None:
+            dir_season = parse_season_from_dirname(text)
+            if dir_season is not None:
+                found_season = dir_season
+
+    if found_season is None:
+        found_season = season
+    if found_episode is None:
+        found_episode = episode
+    return found_season, found_episode
 
 
 def clean_episode_title(stem: str) -> str:
@@ -117,15 +186,17 @@ def clean_episode_title(stem: str) -> str:
     title = stem.strip()
     title = _FNAME_SXXEXX_RE.sub(" ", title, count=1)
     title = re.sub(r"^\s*[-–—_]\s*", "", title)
-    title = re.sub(
-        r"^.*?(第(?:[一二三四五六七八九十百千万]+|\d+)季\s*[-_./]?\s*0*\d+)\s*",
-        "",
-        title,
-        count=1,
-    )
-    title = re.sub(r"^.*?(第0*\d+集)\s*[.·\-_]?\s*", "", title, count=1)
-    title = re.sub(r"^\d+\s*[-–—_.]\s*", "", title)
-    title = re.sub(r"\s+", " ", title).strip(" .-_—")
+    season_ep = _FNAME_SEASON_EP_RE.search(title)
+    if season_ep:
+        title = f"{title[:season_ep.start()]} {title[season_ep.end():]}"
+    else:
+        season_only = _FNAME_SEASON_RE.search(title)
+        if season_only:
+            title = f"{title[:season_only.start()]} {title[season_only.end():]}"
+    title = re.sub(r"^.*?(第\s*0*\d+\s*集)\s*[.·\-—–－_]?\s*", "", title, count=1)
+    title = re.sub(r"^\d+\s*[-–—–－_.]\s*", "", title)
+    title = re.sub(rf"\s*{_SEP_CLASS}\s*", " - ", title)
+    title = re.sub(r"\s+", " ", title).strip(" .-_—–－")
     return title or stem
 
 
@@ -198,6 +269,11 @@ def _collect_audio_files(directory: Path, root_only: bool = False) -> List[Audio
     for idx, f in enumerate(audio_paths, start=1):
         rel = str(f.relative_to(directory)).replace("\\", "/")
         season, episode = parse_season_ep_from_stem(f.stem)
+        if season is None and not root_only:
+            for part in Path(rel).parts[:-1]:
+                dir_season = parse_season_from_dirname(part)
+                if dir_season is not None:
+                    season = dir_season
         if is_extra_track(f.stem):
             # 附属音轨单独进 S00，避免和「第N集」抢同一集号
             season = 0

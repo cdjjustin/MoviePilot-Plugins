@@ -183,6 +183,101 @@ def test_assign_unique_episodes_extras_and_duplicate_集(tmp_path: Path):
     assert keys[3] == (0, 2)  # 插曲 -> S00E02
 
 
+def test_assign_unique_episodes_season2_from_scrape_title(tmp_path: Path):
+    """文件名无季号时，仍应从刮削标题「第二季-015」得到 S02E15，而非连号 S01E58。"""
+    from audiobookorganizer.organizer import assign_unique_episodes, match_tracks
+
+    book_dir = tmp_path / "声娱"
+    book_dir.mkdir()
+    files = []
+    tracks = []
+    # 模拟前 57 集已对齐后的第 58 个文件
+    for i in range(1, 58):
+        path = book_dir / f"track{i:03d}.mp3"
+        path.write_bytes(b"x")
+        files.append(
+            AudioFile(path=path, relative_path=path.name, season=None, episode=None)
+        )
+        tracks.append(TrackInfo(episode=i, title=f"声娱文化 - 第一季-{i:03d} 第{i}集"))
+
+    path = book_dir / "track058.mp3"
+    path.write_bytes(b"x")
+    files.append(
+        AudioFile(path=path, relative_path=path.name, season=None, episode=None)
+    )
+    tracks.append(TrackInfo(episode=58, title="声娱文化 - 第二季-015 剑气长城"))
+
+    path = book_dir / "track059.mp3"
+    path.write_bytes(b"x")
+    files.append(
+        AudioFile(path=path, relative_path=path.name, season=None, episode=None)
+    )
+    tracks.append(TrackInfo(episode=59, title="声娱文化 - 第二季-016 情意绵绵"))
+
+    matched = match_tracks(files, tracks)
+    assigned = assign_unique_episodes(matched, default_season=1)
+    by_name = {Path(af.path).name: (s, e) for af, _, s, e in assigned}
+    assert by_name["track001.mp3"] == (1, 1)
+    assert by_name["track058.mp3"] == (2, 15)
+    assert by_name["track059.mp3"] == (2, 16)
+
+
+def test_assign_unique_episodes_allows_same_ep_across_seasons(tmp_path: Path):
+    from audiobookorganizer.organizer import assign_unique_episodes, match_tracks
+
+    book_dir = tmp_path / "multi"
+    book_dir.mkdir()
+    files = []
+    for name, season, episode in [
+        ("第一季-015 a.mp3", 1, 15),
+        ("第二季-015 b.mp3", 2, 15),
+    ]:
+        path = book_dir / name
+        path.write_bytes(b"x")
+        files.append(
+            AudioFile(
+                path=path,
+                relative_path=name,
+                season=season,
+                episode=episode,
+                episode_title=name.replace(".mp3", ""),
+            )
+        )
+    assigned = assign_unique_episodes(match_tracks(files, []), default_season=1)
+    keys = [(s, e) for _, _, s, e in assigned]
+    assert keys == [(1, 15), (2, 15)]
+
+
+def test_preview_plan_season2_in_target_name(tmp_path: Path):
+    book_dir = tmp_path / "书"
+    book_dir.mkdir()
+    src = book_dir / "声娱文化 - 第二季-015 剑气长城.mp3"
+    src.write_bytes(b"ID3" + b"\x00" * 100)
+    book = BookEntry(
+        book_id="s2",
+        name="书",
+        path=book_dir,
+        files=[
+            AudioFile(
+                path=src,
+                relative_path=src.name,
+                season=2,
+                episode=15,
+                episode_title="声娱文化 - 第二季-015 剑气长城",
+            )
+        ],
+    )
+    meta = AudiobookMetadata(title="书", author="作者", source="local")
+    plan = preview_plan(
+        book,
+        meta,
+        source_root=book_dir,
+        target_root=tmp_path / "out",
+    )
+    assert len(plan.changes) == 1
+    assert "S02E15" in plan.changes[0].target
+
+
 def test_cleanup_previous_outputs_removes_hardlinks_and_keeps_source(tmp_path: Path):
     from audiobookorganizer.organizer import cleanup_previous_outputs
 

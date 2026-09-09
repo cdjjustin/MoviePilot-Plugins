@@ -59,6 +59,51 @@ def test_parse_season_ep_chinese_season_with_trailing_number():
     assert ep == 146
 
 
+@pytest.mark.parametrize(
+    "stem,expect",
+    [
+        ("声娱文化 - 第二季-015 剑气长城", (2, 15)),
+        ("第二季－015 剑气长城", (2, 15)),  # 全角横线
+        ("第二季—016 情意绵绵", (2, 16)),
+        ("声娱文化 - 第二季 - 017 十年之约", (2, 17)),
+        ("S01E58 - 声娱文化 - 第二季-015 剑气长城", (2, 15)),
+        ("第三季-001 开篇", (3, 1)),
+    ],
+)
+def test_parse_season2_dash_episode(stem, expect):
+    assert parse_season_ep_from_stem(stem) == expect
+
+
+def test_resolve_season_episode_prefers_title_over_stale_attrs():
+    from audiobookorganizer.scanner import resolve_season_episode
+
+    season, ep = resolve_season_episode(
+        "track058.mp3",
+        "声娱文化 - 第二季-015 剑气长城",
+        season=1,
+        episode=58,
+    )
+    assert (season, ep) == (2, 15)
+
+
+def test_parse_season_from_dirname():
+    from audiobookorganizer.scanner import parse_season_from_dirname
+
+    assert parse_season_from_dirname("第二季") == 2
+    assert parse_season_from_dirname("Season 02") == 2
+    assert parse_season_from_dirname("S02") == 2
+
+
+def test_scan_inherits_season_from_parent_dir(tmp_path: Path):
+    book = tmp_path / "有声剧"
+    season_dir = book / "第二季"
+    season_dir.mkdir(parents=True)
+    (season_dir / "015 剑气长城.mp3").write_bytes(b"x")
+    books = scan_directory(str(tmp_path))
+    book_map = {b.name: b for b in books}
+    assert book_map["有声剧"].files[0].season == 2
+
+
 def test_parse_season_ep_prefers_chinese_over_sxxexx_prefix():
     # 已错误整理成 S01E304 后，仍应从「第5季」恢复正确季/集
     season, ep = parse_season_ep_from_stem("S01E304 - 149-第5季-146 酒肆筹备")
