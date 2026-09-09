@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 
+from app import schemas
 from app.plugins import _PluginBase
 from app.schemas.types import NotificationType
 from app.sdk.logging import logger
@@ -52,7 +53,7 @@ class AudiobookOrganizer(_PluginBase):
     plugin_name = "有声书刮削整理"
     plugin_desc = "从豆瓣/喜马拉雅刮削元数据，批量整理有声书文件（重命名、目录、标签、封面）"
     plugin_icon = "https://raw.githubusercontent.com/cdjjustin/MoviePilot-Plugins/main/icons/Audiobookshelf_A.png"
-    plugin_version = "3.0.2"
+    plugin_version = "3.0.3"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookorganizer_"
@@ -131,6 +132,7 @@ class AudiobookOrganizer(_PluginBase):
     # ──────────────────────────── API ────────────────────────────
 
     def get_api(self) -> List[Dict[str, Any]]:
+        response_model = schemas.Response[Dict[str, Any]]
         return [
             {
                 "path": "/scan",
@@ -139,6 +141,7 @@ class AudiobookOrganizer(_PluginBase):
                 "auth": "bear",
                 "summary": "扫描有声书目录",
                 "description": "扫描源目录，返回待整理书籍列表",
+                "response_model": response_model,
             },
             {
                 "path": "/search",
@@ -147,6 +150,7 @@ class AudiobookOrganizer(_PluginBase):
                 "auth": "bear",
                 "summary": "搜索元数据",
                 "description": "从豆瓣/喜马拉雅搜索有声书元数据",
+                "response_model": response_model,
             },
             {
                 "path": "/preview",
@@ -155,6 +159,7 @@ class AudiobookOrganizer(_PluginBase):
                 "auth": "bear",
                 "summary": "预览整理计划",
                 "description": "根据选中元数据生成整理预览",
+                "response_model": response_model,
             },
             {
                 "path": "/apply",
@@ -163,6 +168,7 @@ class AudiobookOrganizer(_PluginBase):
                 "auth": "bear",
                 "summary": "执行整理",
                 "description": "应用选中的整理计划",
+                "response_model": response_model,
             },
             {
                 "path": "/history",
@@ -171,10 +177,20 @@ class AudiobookOrganizer(_PluginBase):
                 "auth": "bear",
                 "summary": "操作历史",
                 "description": "返回最近的整理操作记录",
+                "response_model": response_model,
             },
         ]
 
-    def api_scan(self) -> dict:
+    @staticmethod
+    def _response(
+        success: bool,
+        data: Any = None,
+        message: str = "",
+    ) -> schemas.Response[Dict[str, Any]]:
+        """宿主详情页按钮走普通 api 客户端，必须返回严格三段式 envelope。"""
+        return schemas.Response(success=success, message=message, data=data)
+
+    def api_scan(self) -> schemas.Response[Dict[str, Any]]:
         if not self._enabled:
             raise HTTPException(status_code=503, detail="插件未启用")
         if not self._source_path:
@@ -182,15 +198,20 @@ class AudiobookOrganizer(_PluginBase):
 
         books = scan_directory(self._source_path)
         self._books_cache = books
+        books_data = [b.to_dict() for b in books]
         self.save_data("last_scan", {
             "time": datetime.now(timezone.utc).isoformat(),
             "count": len(books),
-            "books": [b.to_dict() for b in books],
+            "books": books_data,
         })
         logger.info(f"[AudiobookOrganizer] 扫描完成，共 {len(books)} 本")
-        return {"total": len(books), "books": [b.to_dict() for b in books]}
+        return self._response(
+            True,
+            data={"total": len(books), "books": books_data},
+            message=f"扫描完成，共 {len(books)} 本",
+        )
 
-    def api_search(self, keyword: str = "") -> dict:
+    def api_search(self, keyword: str = "") -> schemas.Response[Dict[str, Any]]:
         if not self._enabled:
             raise HTTPException(status_code=503, detail="插件未启用")
         keyword = (keyword or "").strip()
@@ -198,9 +219,12 @@ class AudiobookOrganizer(_PluginBase):
             raise HTTPException(status_code=400, detail="缺少搜索关键词")
 
         results = self._search_all(keyword)
-        return {"keyword": keyword, "results": [r.to_dict() for r in results]}
+        return self._response(
+            True,
+            data={"keyword": keyword, "results": [r.to_dict() for r in results]},
+        )
 
-    def api_preview(self, body: dict = None) -> dict:
+    def api_preview(self, body: dict = None) -> schemas.Response[Dict[str, Any]]:
         if not self._enabled:
             raise HTTPException(status_code=503, detail="插件未启用")
 
@@ -229,9 +253,9 @@ class AudiobookOrganizer(_PluginBase):
             organize_mode=self._organize_mode,
         )
         self._plans_cache[plan.plan_id] = plan
-        return plan.to_dict()
+        return self._response(True, data=plan.to_dict())
 
-    def api_apply(self, body: dict = None) -> dict:
+    def api_apply(self, body: dict = None) -> schemas.Response[Dict[str, Any]]:
         if not self._enabled:
             raise HTTPException(status_code=503, detail="插件未启用")
 
@@ -258,11 +282,14 @@ class AudiobookOrganizer(_PluginBase):
             all_results["applied"].append({"plan_id": plan_id, "book": plan.book_name, "result": result})
             self._append_history(plan, result)
 
-        return all_results
+        applied = len(all_results["applied"])
+        failed = len(all_results["errors"])
+        message = f"整理完成：成功 {applied}，失败 {failed}"
+        return self._response(True, data=all_results, message=message)
 
-    def api_history(self, limit: int = 20) -> dict:
+    def api_history(self, limit: int = 20) -> schemas.Response[Dict[str, Any]]:
         history = self.get_data("organize_history") or []
-        return {"history": history[:limit]}
+        return self._response(True, data={"history": history[:limit]})
 
     # ──────────────────────────── 配置表单 ────────────────────────────
 
@@ -513,6 +540,34 @@ class AudiobookOrganizer(_PluginBase):
         books = last_scan.get("books", [])
         history = (self.get_data("organize_history") or [])[:5]
 
+        # VDataTable 只展示扁平字段；嵌套 files 会干扰列渲染
+        table_items = [
+            {
+                "name": item.get("name", ""),
+                "file_count": item.get("file_count", len(item.get("files") or [])),
+                "status": item.get("status", "pending"),
+                "book_id": item.get("book_id", ""),
+            }
+            for item in books
+            if isinstance(item, dict)
+        ]
+        table_headers = [
+            {"title": title, "text": title, "key": key, "value": key}
+            for key, title in (
+                ("name", "书名"),
+                ("file_count", "文件数"),
+                ("status", "状态"),
+            )
+        ]
+        history_items = [
+            {
+                "title": f"{item.get('book', '')} → {item.get('metadata_title', '')}",
+                "subtitle": item.get("time", ""),
+            }
+            for item in history
+            if isinstance(item, dict)
+        ]
+
         return [
             {
                 "component": "VRow",
@@ -566,7 +621,7 @@ class AudiobookOrganizer(_PluginBase):
                                 "content": [
                                     {
                                         "component": "VCardTitle",
-                                        "text": f"待整理书籍（{len(books)}）",
+                                        "text": f"待整理书籍（{len(table_items)}）",
                                     },
                                     {
                                         "component": "VCardText",
@@ -574,14 +629,17 @@ class AudiobookOrganizer(_PluginBase):
                                             {
                                                 "component": "VDataTable",
                                                 "props": {
-                                                    "headers": [
-                                                        {"title": "书名", "key": "name"},
-                                                        {"title": "文件数", "key": "file_count"},
-                                                        {"title": "状态", "key": "status"},
-                                                    ],
-                                                    "items": books,
+                                                    "headers": table_headers,
+                                                    "items": table_items,
                                                     "items-per-page": 10,
+                                                    "density": "compact",
+                                                    "hover": True,
                                                 },
+                                            }
+                                            if table_items
+                                            else {
+                                                "component": "span",
+                                                "text": "暂无待整理书籍，请先扫描目录",
                                             },
                                         ],
                                     },
@@ -610,9 +668,12 @@ class AudiobookOrganizer(_PluginBase):
                                         "content": [
                                             {
                                                 "component": "VList",
-                                                "props": {"items": history},
+                                                "props": {
+                                                    "items": history_items,
+                                                    "lines": "two",
+                                                },
                                             }
-                                            if history
+                                            if history_items
                                             else {
                                                 "component": "span",
                                                 "text": "暂无整理记录",

@@ -24,8 +24,25 @@ app_plugins._PluginBase = type(  # type: ignore[attr-defined]
     },
 )
 
-# Mock app.schemas.types
+# Mock app.schemas.Response（V3 详情页 API envelope）
 app_schemas = _ensure_mock("app.schemas")
+
+
+class _ResponseMeta(type):
+    def __getitem__(cls, item):
+        return cls
+
+
+class _Response(metaclass=_ResponseMeta):
+    def __init__(self, success: bool = True, message: str = "", data=None):
+        self.success = success
+        self.message = message
+        self.data = data
+
+
+app_schemas.Response = _Response  # type: ignore[attr-defined]
+app.schemas = app_schemas  # type: ignore[attr-defined]
+
 app_schemas_types = _ensure_mock("app.schemas.types")
 app_schemas_types.NotificationType = MagicMock(Manual="manual")
 
