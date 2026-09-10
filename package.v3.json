@@ -3,7 +3,7 @@
         "name": "有声书刮削整理",
         "description": "从豆瓣/喜马拉雅刮削元数据，批量整理有声书文件（重命名、目录、标签、封面）",
         "labels": "有声书,刮削,整理,豆瓣,喜马拉雅,元数据",
-        "version": "3.0.18",
+        "version": "3.0.19",
         "icon": "https://raw.githubusercontent.com/cdjjustin/MoviePilot-Plugins/main/icons/Audiobookshelf_A.png",
         "author": "cdjjustin",
         "level": 1,

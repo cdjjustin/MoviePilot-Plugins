@@ -66,7 +66,7 @@ class AudiobookOrganizer(_PluginBase):
     plugin_name = "有声书刮削整理"
     plugin_desc = "从豆瓣/喜马拉雅刮削元数据，批量整理有声书文件（重命名、目录、标签、封面）"
     plugin_icon = "https://raw.githubusercontent.com/cdjjustin/MoviePilot-Plugins/main/icons/Audiobookshelf_A.png"
-    plugin_version = "3.0.18"
+    plugin_version = "3.0.19"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookorganizer_"
@@ -289,7 +289,17 @@ class AudiobookOrganizer(_PluginBase):
         if not book:
             raise HTTPException(status_code=404, detail="未找到对应书籍")
 
-        results = self._search_all(book.name)
+        search_keywords = [book.name]
+        for separator in ("-", "｜", "|", "·"):
+            if separator in book.name:
+                base_name = book.name.split(separator, 1)[0].strip()
+                if base_name and base_name not in search_keywords:
+                    search_keywords.append(base_name)
+        results: List[SearchResult] = []
+        for keyword in search_keywords:
+            results = self._search_all(keyword)
+            if results:
+                break
         cache = self._candidate_store()
         now = datetime.now(timezone.utc)
         expired = [
