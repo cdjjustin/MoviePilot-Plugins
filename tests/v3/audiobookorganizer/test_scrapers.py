@@ -212,6 +212,33 @@ def test_ximalaya_fetch(mock_client_cls):
     assert meta.tracks[0].episode == 1
 
 
+@patch("audiobookorganizer.scrapers.ximalaya.httpx.Client")
+def test_ximalaya_tracks_falls_back_from_webtk_protected_v1_endpoint(mock_client_cls):
+    client = MagicMock()
+    client.__enter__ = MagicMock(return_value=client)
+    client.__exit__ = MagicMock(return_value=False)
+
+    def _get(url, **kwargs):
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        if "/v1/getTracksList" in url:
+            response.json.return_value = {"ret": 407, "msg": "webtk缺失"}
+        else:
+            response.json.return_value = {
+                "data": {"tracks": [{"title": "第01集 正文", "duration": 60}]}
+            }
+        return response
+
+    client.get.side_effect = _get
+    mock_client_cls.return_value = client
+
+    tracks = XimalayaScraper()._fetch_tracks("12345")
+
+    assert len(tracks) == 1
+    assert tracks[0].title == "第01集 正文"
+    assert client.get.call_count == 2
+
+
 def test_ximalaya_fetch_supports_album_page_main_info():
     scraper = XimalayaScraper()
     data = {
