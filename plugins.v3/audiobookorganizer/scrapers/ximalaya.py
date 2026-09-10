@@ -98,6 +98,7 @@ class XimalayaScraper(ScraperBase):
         intro = intro if isinstance(intro, str) else ""
         anchor = anchor if isinstance(anchor, str) else ""
         category = category if isinstance(category, str) else ""
+        author = ""
         if cover and cover.startswith("//"):
             cover = "https:" + cover
 
@@ -106,9 +107,13 @@ class XimalayaScraper(ScraperBase):
 
             intro = BeautifulSoup(intro, "html.parser").get_text("\n", strip=True)
 
+        author_match = re.search(r"作者[ \t]*[：:][ \t]*([^\r\n]+)", intro)
+        if author_match:
+            author = author_match.group(1).strip()
+
         return {
             "title": title,
-            "author": category,
+            "author": author,
             "narrator": anchor,
             "series": title,
             "description": intro,
