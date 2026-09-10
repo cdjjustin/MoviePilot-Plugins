@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from uuid import uuid4
 
 from fastapi import HTTPException
 
@@ -65,7 +66,7 @@ class AudiobookOrganizer(_PluginBase):
     plugin_name = "有声书刮削整理"
     plugin_desc = "从豆瓣/喜马拉雅刮削元数据，批量整理有声书文件（重命名、目录、标签、封面）"
     plugin_icon = "https://raw.githubusercontent.com/cdjjustin/MoviePilot-Plugins/main/icons/Audiobookshelf_A.png"
-    plugin_version = "3.0.16"
+    plugin_version = "3.0.18"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookorganizer_"
@@ -88,6 +89,9 @@ class AudiobookOrganizer(_PluginBase):
     # 运行时缓存
     _books_cache: List[BookEntry] = []
     _plans_cache: Dict[str, OrganizePlan] = {}
+    _candidate_cache: Dict[str, Tuple[str, SearchResult, datetime]] = {}
+    _candidate_cache_ttl_seconds = 900
+    _candidate_cache_limit = 256
 
     # ──────────────────────────── 生命周期 ────────────────────────────
 
@@ -104,6 +108,7 @@ class AudiobookOrganizer(_PluginBase):
         self._monitor_mode = (config.get("monitor_mode") or "notify").strip()
         self._organize_mode = (config.get("organize_mode") or "hardlink").strip()
         self._local_fallback_enabled = bool(config.get("local_fallback_enabled", True))
+        self._candidate_cache = {}
         try:
             self._monitor_interval = max(5, int(config.get("monitor_interval") or 60))
         except (ValueError, TypeError):
@@ -140,6 +145,15 @@ class AudiobookOrganizer(_PluginBase):
         """释放插件后台资源；宿主会按 get_service() 注销定时任务。"""
         self._enabled = False
         self._monitor_enabled = False
+        self._candidate_cache = {}
+
+    def _candidate_store(self) -> Dict[str, Tuple[str, SearchResult, datetime]]:
+        """返回实例级候选缓存，避免未初始化实例共享类属性。"""
+        cache = self.__dict__.get("_candidate_cache")
+        if not isinstance(cache, dict):
+            cache = {}
+            self.__dict__["_candidate_cache"] = cache
+        return cache
 
     # ──────────────────────────── API ────────────────────────────
 
@@ -162,6 +176,15 @@ class AudiobookOrganizer(_PluginBase):
                 "auth": "bear",
                 "summary": "搜索元数据",
                 "description": "从豆瓣/喜马拉雅搜索有声书元数据",
+                "response_model": response_model,
+            },
+            {
+                "path": "/candidates",
+                "endpoint": self.api_candidates,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "获取书籍刮削候选",
+                "description": "按本地书名搜索并返回可选择的远程版本",
                 "response_model": response_model,
             },
             {
@@ -228,6 +251,7 @@ class AudiobookOrganizer(_PluginBase):
 
         books = scan_directory(self._source_path)
         self._books_cache = books
+        self._candidate_cache = {}
         books_data = [b.to_dict() for b in books]
         self.save_data("last_scan", {
             "time": datetime.now(timezone.utc).isoformat(),
@@ -254,6 +278,45 @@ class AudiobookOrganizer(_PluginBase):
             data={"keyword": keyword, "results": [r.to_dict() for r in results]},
         )
 
+    def api_candidates(self, book_id: str = "") -> schemas.Response[Dict[str, Any]]:
+        """按本地书名搜索候选版本，供用户选择后再预览。"""
+        if not self._enabled:
+            raise HTTPException(status_code=503, detail="插件未启用")
+        if not self._source_path:
+            raise HTTPException(status_code=400, detail="未配置源目录")
+        book_id = (book_id or "").strip()
+        book = self._find_book(book_id)
+        if not book:
+            raise HTTPException(status_code=404, detail="未找到对应书籍")
+
+        results = self._search_all(book.name)
+        cache = self._candidate_store()
+        now = datetime.now(timezone.utc)
+        expired = [
+            key for key, value in cache.items()
+            if (now - value[2]).total_seconds() >= self._candidate_cache_ttl_seconds
+        ]
+        for key in expired:
+            cache.pop(key, None)
+        if len(cache) >= self._candidate_cache_limit:
+            oldest = sorted(cache, key=lambda key: cache[key][2])
+            for key in oldest[: len(cache) - self._candidate_cache_limit + 1]:
+                cache.pop(key, None)
+        candidates = []
+        for result in results:
+            while len(cache) >= self._candidate_cache_limit:
+                oldest = min(cache, key=lambda key: cache[key][2])
+                cache.pop(oldest, None)
+            candidate_id = uuid4().hex
+            cache[candidate_id] = (book_id, result, now)
+            item = result.to_dict()
+            item["candidate_id"] = candidate_id
+            candidates.append(item)
+        return self._response(
+            True,
+            data={"book_id": book_id, "keyword": book.name, "candidates": candidates},
+        )
+
     def api_preview(self, body: dict = None) -> schemas.Response[Dict[str, Any]]:
         if not self._enabled:
             raise HTTPException(status_code=503, detail="插件未启用")
@@ -261,13 +324,30 @@ class AudiobookOrganizer(_PluginBase):
         body = body or {}
         book_id = (body.get("book_id") or "").strip()
         metadata_dict = body.get("metadata") or {}
-        source_id = body.get("source_id")
+        candidate_id = body.get("candidate_id")
+        if candidate_id is not None and not isinstance(candidate_id, str):
+            raise HTTPException(status_code=400, detail="candidate_id 必须是字符串")
+        selected_candidate = None
+        if candidate_id:
+            if metadata_dict:
+                raise HTTPException(status_code=400, detail="选择候选时不允许覆盖远程元数据")
+            selected_candidate = self._candidate_store().pop(candidate_id, None)
+            if not selected_candidate:
+                raise HTTPException(status_code=404, detail="候选已过期，请重新搜索")
+            candidate_book_id, selected_candidate, created_at = selected_candidate
+            if (datetime.now(timezone.utc) - created_at).total_seconds() >= self._candidate_cache_ttl_seconds:
+                raise HTTPException(status_code=404, detail="候选已过期，请重新搜索")
+            if candidate_book_id != book_id:
+                raise HTTPException(status_code=400, detail="候选与本地书籍不匹配")
+
+        source = selected_candidate.source if selected_candidate else body.get("source")
+        source_id = selected_candidate.source_id if selected_candidate else body.get("source_id")
         confirmed_source_id = body.get("confirm_source_id")
         if source_id is not None and not isinstance(source_id, str):
             raise HTTPException(status_code=400, detail="source_id 必须是字符串")
         if confirmed_source_id is not None and not isinstance(confirmed_source_id, str):
             raise HTTPException(status_code=400, detail="confirm_source_id 必须是字符串")
-        if source_id and confirmed_source_id != source_id:
+        if source_id and not selected_candidate and confirmed_source_id != source_id:
             raise HTTPException(
                 status_code=400,
                 detail="远程专辑未确认，请提供与 source_id 完全一致的 confirm_source_id",
@@ -278,8 +358,10 @@ class AudiobookOrganizer(_PluginBase):
             raise HTTPException(status_code=404, detail="未找到对应书籍")
 
         metadata = AudiobookMetadata.from_dict(metadata_dict)
-        if not metadata.title and body.get("source") and source_id:
-            metadata = self._fetch_metadata(body["source"], source_id)
+        if selected_candidate and source and source_id:
+            metadata = self._fetch_metadata(source, source_id)
+        elif not metadata.title and source and source_id:
+            metadata = self._fetch_metadata(source, source_id)
         metadata, _ = resolve_metadata(book, metadata, local_fallback=self._local_fallback_enabled)
 
         source_root = Path(self._source_path)
@@ -353,6 +435,14 @@ class AudiobookOrganizer(_PluginBase):
         if not book:
             raise HTTPException(status_code=404, detail="未找到对应书籍，请先扫描目录")
 
+        if mode == "scrape":
+            candidates = self.api_candidates(book_id)
+            return self._response(
+                True,
+                data={"book_id": book_id, "requires_selection": True, **(candidates.data or {})},
+                message="已找到候选版本，请选择后再预览和应用",
+            )
+
         result = self._organize_book(book, mode=mode)
         if not result.get("ok"):
             return self._response(False, data=result, message=result.get("error") or "整理失败")
@@ -381,6 +471,11 @@ class AudiobookOrganizer(_PluginBase):
         mode = (mode or "local").strip().lower()
         if mode not in {"scrape", "local"}:
             raise HTTPException(status_code=400, detail="mode 仅支持 scrape 或 local")
+        if mode == "scrape":
+            return self._response(
+                False,
+                message="批量刮削已禁用，请逐本选择远程版本后再预览和应用",
+            )
         force_all = str(force or "0").strip().lower() in {"1", "true", "yes"}
 
         last_scan = self.get_data("last_scan") or {}
@@ -696,12 +791,12 @@ class AudiobookOrganizer(_PluginBase):
                             "variant": "tonal",
                             "class": "mr-2 mb-1",
                         },
-                        "text": scrape_label,
+                        "text": "选择刮削版本" if raw_status != "organized" else "重新选择刮削版本",
                         "events": {
                             "click": {
-                                "api": f"plugin/{plugin_id}/organize",
+                                "api": f"plugin/{plugin_id}/candidates",
                                 "method": "get",
-                                "params": {"book_id": book_id, "mode": "scrape"},
+                                "params": {"book_id": book_id},
                             }
                         },
                     },
@@ -796,18 +891,6 @@ class AudiobookOrganizer(_PluginBase):
         if pending_count:
             bulk_buttons.extend(
                 [
-                    {
-                        "component": "VBtn",
-                        "props": {"color": "secondary", "variant": "tonal", "class": "mr-2 mb-2"},
-                        "text": f"全部刮削整理（{pending_count}）",
-                        "events": {
-                            "click": {
-                                "api": f"plugin/{plugin_id}/organize_all",
-                                "method": "get",
-                                "params": {"mode": "scrape"},
-                            }
-                        },
-                    },
                     {
                         "component": "VBtn",
                         "props": {"variant": "outlined", "class": "mr-2 mb-2"},
@@ -994,7 +1077,7 @@ class AudiobookOrganizer(_PluginBase):
                 book.name, metadata, len(book.files)
             )
 
-            if self._monitor_mode == "auto" and confidence >= self._confidence_threshold:
+            if self._monitor_mode == "auto" and used_local_fallback and confidence >= self._confidence_threshold:
                 target_root = Path(self._target_path or self._source_path)
                 cleanup_info = self._cleanup_before_organize(book, target_root)
                 plan = preview_plan(

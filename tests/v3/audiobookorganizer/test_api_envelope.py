@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,7 +10,7 @@ import pytest
 
 from audiobookorganizer import AudiobookOrganizer
 from audiobookorganizer import _safe_log_text
-from audiobookorganizer.models import AudioFile, BookEntry
+from audiobookorganizer.models import AudioFile, BookEntry, SearchResult
 from fastapi import HTTPException
 
 
@@ -45,6 +46,7 @@ def plugin(tmp_path: Path) -> AudiobookOrganizer:
     p._source_path = str(tmp_path)
     p._target_path = str(tmp_path / "out")
     p._saved = {}
+    p._candidate_cache = {}
     p.save_data = lambda key, val: p._saved.__setitem__(key, val)
     p.get_data = lambda key: p._saved.get(key)
     return p
@@ -89,12 +91,12 @@ def test_get_page_renders_book_list_items(plugin: AudiobookOrganizer):
     assert find(page, "VDataTable") == []
     buttons = find(page, "VBtn")
     labels = [b.get("text") for b in buttons]
-    assert "刮削整理" in labels
+    assert "选择刮削版本" in labels
     assert "本地整理" in labels
     assert "全部本地整理（1）" in labels
-    organize = next(b for b in buttons if b.get("text") == "刮削整理")
+    organize = next(b for b in buttons if b.get("text") == "选择刮削版本")
+    assert organize["events"]["click"]["api"] == "plugin/AudiobookOrganizer/candidates"
     assert organize["events"]["click"]["params"]["book_id"] == "b1"
-    assert organize["events"]["click"]["params"]["mode"] == "scrape"
 
 
 def test_api_organize_local(plugin: AudiobookOrganizer, tmp_path: Path, monkeypatch):
@@ -172,3 +174,58 @@ def test_api_preview_passes_exact_source_id_unchanged(plugin: AudiobookOrganizer
 
     assert response.success is True
     assert seen == [("ximalaya", " 9724463 ")]
+
+
+def test_api_candidates_searches_by_book_and_returns_selectable_ids(plugin: AudiobookOrganizer, monkeypatch):
+    plugin.api_scan()
+    monkeypatch.setattr(
+        plugin,
+        "_search_all",
+        lambda keyword: [
+            SearchResult(
+                source="ximalaya",
+                source_id="9724463",
+                title="《剑来》上",
+                author="烽火戏诸侯",
+                narrator="大斌",
+            )
+        ],
+    )
+
+    plugin._candidate_cache["expired"] = (
+        "old-book",
+        SearchResult(source="ximalaya", source_id="old", title="旧"),
+        datetime.now(timezone.utc) - timedelta(seconds=901),
+    )
+    response = plugin.api_candidates(plugin._books_cache[0].book_id)
+
+    assert "expired" not in plugin._candidate_cache
+    assert response.data["keyword"] == "三体"
+    assert len(response.data["candidates"]) == 1
+    candidate = response.data["candidates"][0]
+    assert candidate["candidate_id"]
+    assert candidate["source_id"] == "9724463"
+
+    with pytest.raises(HTTPException) as exc:
+        plugin.api_preview({
+            "book_id": plugin._books_cache[0].book_id,
+            "candidate_id": candidate["candidate_id"],
+            "metadata": {"title": "伪造"},
+        })
+    assert exc.value.status_code == 400
+
+    seen = []
+    monkeypatch.setattr(
+        plugin,
+        "_fetch_metadata",
+        lambda source, source_id: seen.append((source, source_id))
+        or __import__("audiobookorganizer.models", fromlist=["AudiobookMetadata"]).AudiobookMetadata(
+            title="三体", source=source, source_id=source_id
+        ),
+    )
+    preview = plugin.api_preview({
+        "book_id": plugin._books_cache[0].book_id,
+        "candidate_id": candidate["candidate_id"],
+    })
+    assert preview.success is True
+    assert seen == [("ximalaya", "9724463")]

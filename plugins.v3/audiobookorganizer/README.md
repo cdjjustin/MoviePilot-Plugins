@@ -74,22 +74,23 @@
 |------|------|------|
 | GET | `/scan` | 扫描源目录 |
 | GET | `/search?keyword=` | 搜索元数据 |
+| GET | `/candidates?book_id=` | 按本地书名搜索并返回可选择的远程版本 |
 | POST | `/preview` | 预览整理计划 |
 | POST | `/apply` | 执行整理 |
 | GET | `/history` | 操作历史 |
 
 ### 预览请求示例
 
-选择远程专辑时，`confirm_source_id` 必须与 `source_id` 原值完全一致（包括空格），否则接口拒绝生成计划。
+推荐先调用 `/candidates?book_id=`，从返回的候选列表中选择 `candidate_id`，再生成预览。这样不需要手填远程 `source_id`。
 
 ```json
 {
   "book_id": "abc123",
-  "source": "ximalaya",
-  "source_id": "12345678",
-  "confirm_source_id": "12345678"
+  "candidate_id": "候选接口返回的 candidate_id"
 }
 ```
+
+旧版直接指定远程来源仍兼容，但必须让 `confirm_source_id` 与 `source_id` 原值完全一致；未确认的远程来源会被拒绝。
 
 ### 执行整理示例
 
