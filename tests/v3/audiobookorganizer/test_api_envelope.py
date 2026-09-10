@@ -10,6 +10,7 @@ import pytest
 from audiobookorganizer import AudiobookOrganizer
 from audiobookorganizer import _safe_log_text
 from audiobookorganizer.models import AudioFile, BookEntry
+from fastapi import HTTPException
 
 
 def test_safe_log_text_removes_control_characters():
@@ -117,3 +118,57 @@ def test_api_organize_local(plugin: AudiobookOrganizer, tmp_path: Path, monkeypa
     assert resp.data["local"] is True
     assert plugin._saved["last_scan"]["books"][0]["status"] == "organized"
     assert plugin._saved.get("organize_history")
+
+
+def test_api_preview_requires_explicit_source_confirmation(plugin: AudiobookOrganizer):
+    plugin.api_scan()
+
+    with pytest.raises(HTTPException) as exc:
+        plugin.api_preview({
+            "book_id": plugin._books_cache[0].book_id,
+            "source": "ximalaya",
+            "source_id": "9724463",
+        })
+
+    assert exc.value.status_code == 400
+    assert "confirm_source_id" in str(exc.value.detail)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"source_id": " 9724463 ", "confirm_source_id": "9724463"},
+        {"source_id": ["9724463"], "confirm_source_id": ["9724463"]},
+        {"source_id": "9724463", "confirm_source_id": ["9724463"]},
+    ],
+)
+def test_api_preview_rejects_non_exact_or_malformed_source_confirmation(plugin: AudiobookOrganizer, body: dict):
+    plugin.api_scan()
+    body["book_id"] = plugin._books_cache[0].book_id
+
+    with pytest.raises(HTTPException) as exc:
+        plugin.api_preview(body)
+
+    assert exc.value.status_code == 400
+
+
+def test_api_preview_passes_exact_source_id_unchanged(plugin: AudiobookOrganizer, monkeypatch):
+    plugin.api_scan()
+    seen = []
+
+    def fetch_metadata(source, source_id):
+        seen.append((source, source_id))
+        from audiobookorganizer.models import AudiobookMetadata
+
+        return AudiobookMetadata(title="三体", source=source, source_id=source_id)
+
+    monkeypatch.setattr(plugin, "_fetch_metadata", fetch_metadata)
+    response = plugin.api_preview({
+        "book_id": plugin._books_cache[0].book_id,
+        "source": "ximalaya",
+        "source_id": " 9724463 ",
+        "confirm_source_id": " 9724463 ",
+    })
+
+    assert response.success is True
+    assert seen == [("ximalaya", " 9724463 ")]

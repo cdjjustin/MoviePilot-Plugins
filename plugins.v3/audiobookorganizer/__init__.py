@@ -65,7 +65,7 @@ class AudiobookOrganizer(_PluginBase):
     plugin_name = "有声书刮削整理"
     plugin_desc = "从豆瓣/喜马拉雅刮削元数据，批量整理有声书文件（重命名、目录、标签、封面）"
     plugin_icon = "https://raw.githubusercontent.com/cdjjustin/MoviePilot-Plugins/main/icons/Audiobookshelf_A.png"
-    plugin_version = "3.0.15"
+    plugin_version = "3.0.16"
     plugin_author = "cdjjustin"
     author_url = "https://github.com/cdjjustin"
     plugin_config_prefix = "audiobookorganizer_"
@@ -261,14 +261,25 @@ class AudiobookOrganizer(_PluginBase):
         body = body or {}
         book_id = (body.get("book_id") or "").strip()
         metadata_dict = body.get("metadata") or {}
+        source_id = body.get("source_id")
+        confirmed_source_id = body.get("confirm_source_id")
+        if source_id is not None and not isinstance(source_id, str):
+            raise HTTPException(status_code=400, detail="source_id 必须是字符串")
+        if confirmed_source_id is not None and not isinstance(confirmed_source_id, str):
+            raise HTTPException(status_code=400, detail="confirm_source_id 必须是字符串")
+        if source_id and confirmed_source_id != source_id:
+            raise HTTPException(
+                status_code=400,
+                detail="远程专辑未确认，请提供与 source_id 完全一致的 confirm_source_id",
+            )
 
         book = self._find_book(book_id)
         if not book:
             raise HTTPException(status_code=404, detail="未找到对应书籍")
 
         metadata = AudiobookMetadata.from_dict(metadata_dict)
-        if not metadata.title and body.get("source") and body.get("source_id"):
-            metadata = self._fetch_metadata(body["source"], body["source_id"])
+        if not metadata.title and body.get("source") and source_id:
+            metadata = self._fetch_metadata(body["source"], source_id)
         metadata, _ = resolve_metadata(book, metadata, local_fallback=self._local_fallback_enabled)
 
         source_root = Path(self._source_path)
