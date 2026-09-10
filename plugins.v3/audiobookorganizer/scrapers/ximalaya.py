@@ -11,7 +11,10 @@ from ..models import AudiobookMetadata, SearchResult, TrackInfo
 from .base import ScraperBase
 
 _XIMALAYA_SEARCH_API = "https://www.ximalaya.com/revision/search"
-_XIMALAYA_ALBUM_API = "https://www.ximalaya.com/revision/album/v1/getTracksList"
+_XIMALAYA_ALBUM_APIS = (
+    "https://www.ximalaya.com/revision/album/v1/getTracksList",
+    "https://www.ximalaya.com/revision/album/getTracksList",
+)
 _XIMALAYA_ALBUM_INFO = "https://www.ximalaya.com/revision/album/v1/simple"
 
 
@@ -126,30 +129,36 @@ class XimalayaScraper(ScraperBase):
         page_size = 30
 
         while True:
-            try:
-                with httpx.Client(
-                    headers=self._headers(), timeout=self.timeout, follow_redirects=True
-                ) as client:
-                    resp = client.get(
-                        _XIMALAYA_ALBUM_API,
-                        params={
-                            "albumId": album_id,
-                            "pageNum": page,
-                            "pageSize": page_size,
-                        },
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-            except Exception:
-                break
+            track_list = None
+            for endpoint in _XIMALAYA_ALBUM_APIS:
+                try:
+                    with httpx.Client(
+                        headers=self._headers(), timeout=self.timeout, follow_redirects=True
+                    ) as client:
+                        resp = client.get(
+                            endpoint,
+                            params={
+                                "albumId": album_id,
+                                "pageNum": page,
+                                "pageSize": page_size,
+                            },
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                except Exception:
+                    continue
 
-            if not isinstance(data, dict):
-                break
-            payload = data.get("data")
-            if not isinstance(payload, dict):
-                break
-            track_list = payload.get("tracks") or []
-            if not isinstance(track_list, list) or not track_list:
+                if not isinstance(data, dict):
+                    continue
+                payload = data.get("data")
+                if not isinstance(payload, dict):
+                    continue
+                candidate = payload.get("tracks") or []
+                if isinstance(candidate, list) and candidate:
+                    track_list = candidate
+                    break
+
+            if track_list is None:
                 break
 
             for idx, t in enumerate(track_list, start=len(tracks) + 1):
