@@ -79,6 +79,17 @@ def merge_metadata(
     )
 
 
+def _regular_audio_files(files: List) -> List:
+    """返回需要与远程正集分集绑定的文件，排除 S00 附属音轨。"""
+    return [
+        f
+        for f in files
+        if getattr(f, "season", None) != 0
+        and not is_extra_track(getattr(getattr(f, "path", None), "stem", ""))
+        and not is_extra_track(getattr(f, "episode_title", ""))
+    ]
+
+
 def match_tracks(
     files: List,
     tracks: List[TrackInfo],
@@ -97,18 +108,27 @@ def match_tracks(
             for i, f in enumerate(files)
         ]
 
-    track_by_ep = {t.episode: t for t in tracks}
+    # S00 附属音轨没有对应的远程正集；不能用 episode 作为唯一键，
+    # 否则 S00E01 会和 S01E01 覆盖到同一个远程 track。远程分集
+    # 按正集文件的稳定顺序绑定，附属音轨保留本地标题。
+    regular_files = _regular_audio_files(files)
+    regular_file_ids = {id(f) for f in regular_files}
+    regular_tracks = iter(tracks)
     matched: List[Tuple[object, TrackInfo]] = []
-
-    for idx, f in enumerate(files):
-        ep = f.episode or (idx + 1)
-        track = track_by_ep.get(ep)
-        if not track and idx < len(tracks):
-            track = tracks[idx]
-        if not track:
-            track = TrackInfo(episode=ep, title=f.episode_title or f"第{ep:02d}集")
-        matched.append((f, track))
-
+    regular_position = 0
+    extra_position = 0
+    for f in files:
+        if id(f) in regular_file_ids:
+            regular_position += 1
+            track = next(regular_tracks, None)
+            if track is not None:
+                matched.append((f, track))
+                continue
+            ep = getattr(f, "episode", None) or regular_position
+        else:
+            extra_position += 1
+            ep = getattr(f, "episode", None) or extra_position
+        matched.append((f, TrackInfo(episode=ep, title=getattr(f, "episode_title", "") or f"第{ep:02d}集")))
     return matched
 
 
@@ -204,9 +224,9 @@ def assign_unique_episodes(
             used.add((season, ep))
             assigned.append((audio_file, track, season, ep))
 
-    # 保持原文件顺序输出
-    order = {id(audio_file): idx for idx, (audio_file, _) in enumerate(matched)}
-    assigned.sort(key=lambda row: order.get(id(row[0]), 10**9))
+    # 目录创建与媒体库扫描必须遵循稳定的季/集顺序；否则媒体库会按
+    # 扫描到的创建顺序保存章节，导致 S04 后跳到 S07 等错乱。
+    assigned.sort(key=lambda row: (row[2], row[3], str(getattr(row[0], "path", ""))))
     return assigned
 
 
@@ -245,9 +265,10 @@ def preview_plan(
     season = metadata.season or 1
 
     matched = match_tracks(book.files, metadata.tracks)
-    if metadata.tracks and len(metadata.tracks) != len(book.files):
+    regular_files = _regular_audio_files(book.files)
+    if metadata.tracks and len(metadata.tracks) != len(regular_files):
         warnings.append(
-            f"远程分集数({len(metadata.tracks)})与本地文件数({len(book.files)})不一致"
+            f"远程正集分集数({len(metadata.tracks)})与本地正集文件数({len(regular_files)})不一致"
         )
 
     assigned = assign_unique_episodes(matched, default_season=season)

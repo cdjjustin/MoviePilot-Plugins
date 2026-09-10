@@ -79,9 +79,85 @@ def test_match_tracks_with_metadata(sample_book, sample_metadata):
     assert matched[0][1].title == "科学边界"
 
 
-def test_match_tracks_without_metadata(sample_book):
-    matched = match_tracks(sample_book.files, [])
-    assert len(matched) == 3
+def test_match_tracks_with_metadata_keeps_special_tracks_separate(tmp_path: Path):
+    book_dir = tmp_path / "book"
+    book_dir.mkdir()
+    files = []
+    for name, season, episode in [
+        ("主题曲.mp3", 0, None),
+        ("第一季-001.mp3", 1, 1),
+        ("第二季-001.mp3", 2, 1),
+    ]:
+        path = book_dir / name
+        path.write_bytes(b"audio")
+        files.append(
+            AudioFile(
+                path=path,
+                relative_path=name,
+                season=season,
+                episode=episode,
+                episode_title=name.removesuffix(".mp3"),
+            )
+        )
+
+    matched = match_tracks(
+        files,
+        [TrackInfo(episode=1, title="第一季远程标题"), TrackInfo(episode=1, title="第二季远程标题")],
+    )
+
+    assert [track.title for _, track in matched] == [
+        "主题曲",
+        "第一季远程标题",
+        "第二季远程标题",
+    ]
+
+
+def test_match_tracks_short_remote_list_keeps_regular_fallback_numbers(tmp_path: Path):
+    book_dir = tmp_path / "book"
+    book_dir.mkdir()
+    files = []
+    for name, season, episode in [
+        ("主题曲.mp3", 0, None),
+        ("第一集.mp3", 1, 1),
+        ("第二集.mp3", 1, None),
+    ]:
+        path = book_dir / name
+        path.write_bytes(b"audio")
+        files.append(AudioFile(path=path, relative_path=name, season=season, episode=episode, episode_title=name[:-4]))
+
+    matched = match_tracks(files, [TrackInfo(episode=1, title="远程第一集")])
+
+    assert [track.episode for _, track in matched] == [1, 1, 2]
+
+
+def test_preview_plan_counts_only_regular_files_for_remote_warning(tmp_path: Path):
+    book_dir = tmp_path / "book"
+    book_dir.mkdir()
+    files = []
+    for name, season, episode in [
+        ("主题曲.mp3", 0, None),
+        ("第一集.mp3", 1, 1),
+        ("第二集.mp3", 1, 2),
+    ]:
+        path = book_dir / name
+        path.write_bytes(b"audio")
+        files.append(AudioFile(path=path, relative_path=name, season=season, episode=episode, episode_title=name[:-4]))
+    book = BookEntry(book_id="warning", name="book", path=book_dir, files=files)
+    metadata = AudiobookMetadata(
+        title="book",
+        tracks=[TrackInfo(episode=1, title="一"), TrackInfo(episode=2, title="二")],
+    )
+
+    matching = preview_plan(book, metadata, source_root=tmp_path, target_root=tmp_path / "out")
+    assert not any("远程正集分集数" in warning for warning in matching.warnings)
+
+    mismatching = preview_plan(
+        book,
+        AudiobookMetadata(title="book", tracks=[TrackInfo(episode=1, title="一")]),
+        source_root=tmp_path,
+        target_root=tmp_path / "out2",
+    )
+    assert any("远程正集分集数" in warning for warning in mismatching.warnings)
 
 
 def test_preview_plan_no_changes(sample_book, sample_metadata, tmp_path: Path):
@@ -177,10 +253,7 @@ def test_assign_unique_episodes_extras_and_duplicate_集(tmp_path: Path):
     assigned = assign_unique_episodes(matched, default_season=1)
     keys = [(s, e) for _, _, s, e in assigned]
     assert len(keys) == len(set(keys))
-    assert keys[0] == (0, 1)  # 主题曲 -> S00E01
-    assert keys[1][0] == 1 and keys[2][0] == 1  # 两段第1集在 S01 且集号不同
-    assert keys[1][1] != keys[2][1]
-    assert keys[3] == (0, 2)  # 插曲 -> S00E02
+    assert keys == [(0, 1), (0, 2), (1, 1), (1, 2), (1, 3), (1, 4)]
 
 
 def test_assign_unique_episodes_season2_from_scrape_title(tmp_path: Path):
@@ -462,3 +535,40 @@ def test_apply_plan_copy_keeps_source(sample_book, sample_metadata, tmp_path: Pa
         dst = Path(change.target)
         assert dst.exists()
         assert dst.stat().st_ino != Path(change.source).stat().st_ino
+
+
+def test_preview_plan_orders_changes_by_season_and_episode(tmp_path: Path):
+    book_dir = tmp_path / "剑来"
+    book_dir.mkdir()
+    specs = [(7, 65), (1, 2), (0, 2), (5, 1), (0, 1), (1, 1)]
+    files = []
+    for season, episode in specs:
+        path = book_dir / f"原始-{season}-{episode}.mp3"
+        path.write_bytes(b"audio")
+        files.append(
+            AudioFile(
+                path=path,
+                relative_path=path.name,
+                season=season,
+                episode=episode,
+                episode_title=f"S{season:02d}E{episode:02d}",
+            )
+        )
+    book = BookEntry(book_id="ordered", name="剑来", path=book_dir, files=files)
+
+    plan = preview_plan(
+        book,
+        build_local_metadata(book),
+        source_root=tmp_path,
+        target_root=tmp_path / "out",
+    )
+
+    prefixes = [Path(change.target).name.split(" - ", 1)[0] for change in plan.changes]
+    assert prefixes == [
+        "S00E01",
+        "S00E02",
+        "S01E01",
+        "S01E02",
+        "S05E01",
+        "S07E65",
+    ]
