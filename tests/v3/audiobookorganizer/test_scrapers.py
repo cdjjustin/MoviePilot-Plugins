@@ -221,7 +221,7 @@ def test_ximalaya_fetch_supports_album_page_main_info():
                 "anchorName": "大斌",
                 "categoryTitle": "有声书",
                 "cover": "//image.ximalaya.com/cover.jpg",
-                "richIntro": "剧情简介",
+                "richIntro": "剧情简介\n作者：烽火戏诸侯\n主播：大斌",
             }
         }
     }
@@ -238,8 +238,42 @@ def test_ximalaya_fetch_supports_album_page_main_info():
         meta = scraper.fetch("12345")
 
     assert meta.title == "《剑来》上"
+    assert meta.author == "烽火戏诸侯"
     assert meta.narrator == "大斌"
     assert meta.cover_url == "https://image.ximalaya.com/cover.jpg"
+
+
+@pytest.mark.parametrize(
+    "intro",
+    [
+        "剧情简介",
+        "作者：<br>主播：大斌",
+    ],
+)
+def test_ximalaya_fetch_does_not_infer_author_from_category_or_next_line(intro):
+    data = {
+        "data": {
+            "albumPageMainInfo": {
+                "albumTitle": "剑来",
+                "anchorName": "大斌",
+                "categoryTitle": "有声书",
+                "richIntro": intro,
+            }
+        }
+    }
+
+    with patch("audiobookorganizer.scrapers.ximalaya.httpx.Client") as client_cls:
+        client = MagicMock()
+        client.__enter__ = MagicMock(return_value=client)
+        client.__exit__ = MagicMock(return_value=False)
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        response.json.return_value = data
+        client.get.return_value = response
+        client_cls.return_value = client
+        meta = XimalayaScraper().fetch("12345")
+
+    assert meta.author == ""
 
 
 def test_title_score_exact_match():
@@ -388,5 +422,5 @@ def test_ximalaya_album_info_supports_direct_data_envelope(mock_client_cls):
 
     assert result["title"] == "直接专辑"
     assert result["narrator"] == "主播"
-    assert result["author"] == "有声书"
+    assert result["author"] == ""
     assert result["description"] == "简介"
