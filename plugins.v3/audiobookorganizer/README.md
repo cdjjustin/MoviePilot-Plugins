@@ -80,11 +80,14 @@
 
 ### 预览请求示例
 
+选择远程专辑时，`confirm_source_id` 必须与 `source_id` 原值完全一致（包括空格），否则接口拒绝生成计划。
+
 ```json
 {
   "book_id": "abc123",
   "source": "ximalaya",
-  "source_id": "12345678"
+  "source_id": "12345678",
+  "confirm_source_id": "12345678"
 }
 ```
 
