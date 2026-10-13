@@ -349,33 +349,30 @@ def apply_plan(
     replace_existing: bool = False,
 ) -> Dict[str, object]:
     """执行整理计划。"""
-    results = {"success": [], "skipped": [], "errors": []}
+    results = {"success": [], "skipped": [], "errors": [], "warnings": []}
 
     effective_mode = _effective_mode(organize_mode, plan.changes)
     write_tags_enabled = effective_mode in ("move", "copy")
 
     cover_data: Optional[bytes] = None
+    cover_error_recorded = False
     if cover_url and write_tags_enabled:
         cover_data = _download_cover(cover_url)
+        if not cover_data and not dry_run:
+            results["errors"].append({"cover": plan.cover_path, "error": "封面下载失败"})
+            cover_error_recorded = True
 
     for change in plan.changes:
         src = Path(change.source)
         dst = Path(change.target)
 
         if not src.is_file():
-            results["skipped"].append({"source": change.source, "reason": "源文件不存在"})
+            results["skipped"].append({
+                "source": change.source,
+                "target": change.target,
+                "reason": "源文件不存在",
+            })
             continue
-
-        if dst.exists() and dst.resolve() != src.resolve():
-            if replace_existing and _is_safe_path(dst, target_root):
-                try:
-                    dst.unlink()
-                except OSError as exc:
-                    results["errors"].append({"target": change.target, "error": f"无法覆盖目标: {exc}"})
-                    continue
-            else:
-                results["skipped"].append({"target": change.target, "reason": "目标已存在"})
-                continue
 
         if dry_run:
             results["success"].append({
@@ -386,6 +383,28 @@ def apply_plan(
             })
             continue
 
+        backup_path: Optional[Path] = None
+        if dst.exists() and dst.resolve() != src.resolve():
+            if replace_existing and _is_safe_path(dst, target_root) and (dst.is_file() or dst.is_symlink()):
+                backup_path = dst.with_name(f".{dst.name}.audiobookorganizer-{uuid.uuid4().hex}.bak")
+                try:
+                    os.replace(dst, backup_path)
+                except OSError as exc:
+                    results["errors"].append({
+                        "source": change.source,
+                        "target": change.target,
+                        "error": f"无法暂存旧目标: {exc}",
+                    })
+                    continue
+            else:
+                results["skipped"].append({
+                    "source": change.source,
+                    "target": change.target,
+                    "reason": "目标已存在且不可安全覆盖",
+                })
+                continue
+
+        used_mode = ""
         try:
             used_mode = _place_file(src, dst, effective_mode)
             if write_tags_enabled or used_mode == "copy_fallback":
@@ -399,13 +418,50 @@ def apply_plan(
                     description=plan.metadata.description,
                     cover_data=cover_data,
                 )
+            if backup_path and backup_path.exists():
+                try:
+                    backup_path.unlink()
+                except OSError as cleanup_exc:
+                    results["warnings"].append({
+                        "target": change.target,
+                        "backup": str(backup_path),
+                        "warning": f"新输出已成功写入，但旧目标备份未能清理: {cleanup_exc}",
+                    })
             results["success"].append({
                 "source": change.source,
                 "target": change.target,
                 "mode": used_mode,
             })
         except Exception as exc:
-            results["errors"].append({"source": change.source, "error": str(exc)})
+            rollback_errors = []
+            try:
+                if effective_mode == "move" and dst.is_file() and dst.resolve() != src.resolve():
+                    if not src.exists():
+                        src.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(dst), str(src))
+                    else:
+                        dst.unlink()
+                elif src.is_file() and dst.is_file() and dst.resolve() != src.resolve():
+                    same_inode = dst.stat().st_ino == src.stat().st_ino
+                    if (
+                        used_mode in ("copy", "copy_fallback")
+                        or effective_mode == "copy"
+                        or (effective_mode == "hardlink" and not same_inode)
+                    ):
+                        dst.unlink()
+            except Exception as rollback_exc:
+                rollback_errors.append(f"删除失败输出失败: {rollback_exc}")
+            try:
+                if backup_path and backup_path.exists():
+                    if dst.exists() or dst.is_symlink():
+                        raise RuntimeError(f"新目标仍存在，旧目标备份保留在 {backup_path}")
+                    os.replace(backup_path, dst)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"恢复旧目标失败: {rollback_exc}")
+            rollback_detail = f"；回滚失败: {'；'.join(rollback_errors)}" if rollback_errors else ""
+            results["errors"].append(
+                {"source": change.source, "target": change.target, "error": f"{exc}{rollback_detail}"}
+            )
 
     if cover_data and plan.cover_path and write_tags_enabled and not dry_run:
         try:
@@ -420,6 +476,12 @@ def apply_plan(
                 save_cover(cover_data, Path(plan.cover_path).parent)
             except Exception as exc:
                 results["errors"].append({"cover": plan.cover_path, "error": str(exc)})
+        elif not cover_error_recorded:
+            results["errors"].append({"cover": plan.cover_path, "error": "封面下载失败"})
+
+    if plan.cover_path and cover_url and not dry_run and not Path(plan.cover_path).is_file():
+        if not any(item.get("cover") == plan.cover_path for item in results["errors"]):
+            results["errors"].append({"cover": plan.cover_path, "error": "封面文件未生成"})
 
     return results
 
