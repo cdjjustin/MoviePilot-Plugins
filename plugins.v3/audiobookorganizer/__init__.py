@@ -5,7 +5,10 @@ AudiobookOrganizer – MoviePilot V3 插件
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -109,6 +112,9 @@ class AudiobookOrganizer(_PluginBase):
         self._organize_mode = (config.get("organize_mode") or "hardlink").strip()
         self._local_fallback_enabled = bool(config.get("local_fallback_enabled", True))
         self._candidate_cache = {}
+        self.__dict__.pop("_candidate_selection", None)
+        self.__dict__.pop("_active_preview", None)
+        self.__dict__.pop("_operation_feedback", None)
         try:
             self._monitor_interval = max(5, int(config.get("monitor_interval") or 60))
         except (ValueError, TypeError):
@@ -146,6 +152,9 @@ class AudiobookOrganizer(_PluginBase):
         self._enabled = False
         self._monitor_enabled = False
         self._candidate_cache = {}
+        self.__dict__.pop("_candidate_selection", None)
+        self.__dict__.pop("_active_preview", None)
+        self._plans_cache = {}
 
     def _candidate_store(self) -> Dict[str, Tuple[str, SearchResult, datetime]]:
         """返回实例级候选缓存，避免未初始化实例共享类属性。"""
@@ -185,6 +194,15 @@ class AudiobookOrganizer(_PluginBase):
                 "auth": "bear",
                 "summary": "获取书籍刮削候选",
                 "description": "按本地书名搜索并返回可选择的远程版本",
+                "response_model": response_model,
+            },
+            {
+                "path": "/selection/clear",
+                "endpoint": self.api_selection_clear,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "关闭候选选择",
+                "description": "清除当前书籍的候选选择状态",
                 "response_model": response_model,
             },
             {
@@ -252,6 +270,9 @@ class AudiobookOrganizer(_PluginBase):
         books = scan_directory(self._source_path)
         self._books_cache = books
         self._candidate_cache = {}
+        self.__dict__.pop("_candidate_selection", None)
+        self.__dict__.pop("_active_preview", None)
+        self._plans_cache = {}
         books_data = [b.to_dict() for b in books]
         self.save_data("last_scan", {
             "time": datetime.now(timezone.utc).isoformat(),
@@ -322,10 +343,27 @@ class AudiobookOrganizer(_PluginBase):
             item = result.to_dict()
             item["candidate_id"] = candidate_id
             candidates.append(item)
+        # PageRender does not consume an API response body. Its successful action
+        # reloads get_page(), so retain the results for that subsequent render.
+        self.__dict__.setdefault("_candidate_selection", {})[book_id] = candidates
         return self._response(
             True,
             data={"book_id": book_id, "keyword": book.name, "candidates": candidates},
         )
+
+    def api_selection_clear(self, book_id: str = "") -> schemas.Response[Dict[str, Any]]:
+        """关闭候选弹窗；缓存的短期 candidate_id 仍由 TTL 管理。"""
+        selections = self.__dict__.get("_candidate_selection", {})
+        previews = self.__dict__.get("_active_preview", {})
+        book_id = (book_id or "").strip()
+        selections.pop(book_id, None)
+        preview = previews.pop(book_id, None)
+        if isinstance(preview, dict) and preview.get("plan_id"):
+            self._plans_cache.pop(preview["plan_id"], None)
+        for candidate_id, cached in list(self._candidate_store().items()):
+            if cached[0] == book_id:
+                self._candidate_store().pop(candidate_id, None)
+        return self._response(True, data={"book_id": book_id}, message="已关闭候选/预览")
 
     def api_preview(self, body: dict = None) -> schemas.Response[Dict[str, Any]]:
         if not self._enabled:
@@ -341,14 +379,18 @@ class AudiobookOrganizer(_PluginBase):
         if candidate_id:
             if metadata_dict:
                 raise HTTPException(status_code=400, detail="选择候选时不允许覆盖远程元数据")
-            selected_candidate = self._candidate_store().pop(candidate_id, None)
-            if not selected_candidate:
+            candidate_cache = self._candidate_store()
+            cached_candidate = candidate_cache.get(candidate_id)
+            if not cached_candidate:
                 raise HTTPException(status_code=404, detail="候选已过期，请重新搜索")
-            candidate_book_id, selected_candidate, created_at = selected_candidate
+            candidate_book_id, candidate_result, created_at = cached_candidate
             if (datetime.now(timezone.utc) - created_at).total_seconds() >= self._candidate_cache_ttl_seconds:
+                candidate_cache.pop(candidate_id, None)
                 raise HTTPException(status_code=404, detail="候选已过期，请重新搜索")
             if candidate_book_id != book_id:
                 raise HTTPException(status_code=400, detail="候选与本地书籍不匹配")
+            candidate_cache.pop(candidate_id, None)
+            selected_candidate = candidate_result
 
         source = selected_candidate.source if selected_candidate else body.get("source")
         source_id = selected_candidate.source_id if selected_candidate else body.get("source_id")
@@ -385,7 +427,12 @@ class AudiobookOrganizer(_PluginBase):
             template=self._naming_template,
             organize_mode=self._organize_mode,
         )
+        duplicate_targets = self._duplicate_target_paths(plan.changes)
+        if duplicate_targets:
+            plan.warnings.append("多个源文件指向相同目标，禁止应用：" + "、".join(duplicate_targets))
         self._plans_cache[plan.plan_id] = plan
+        self.__dict__.setdefault("_active_preview", {})[book_id] = plan.to_dict()
+        self.__dict__.get("_candidate_selection", {}).pop(book_id, None)
         return self._response(True, data=plan.to_dict())
 
     def api_apply(self, body: dict = None) -> schemas.Response[Dict[str, Any]]:
@@ -398,12 +445,30 @@ class AudiobookOrganizer(_PluginBase):
             raise HTTPException(status_code=400, detail="未指定整理计划")
 
         target_root = Path(self._target_path or self._source_path)
-        all_results: Dict[str, Any] = {"applied": [], "errors": []}
+        all_results: Dict[str, Any] = {"applied": [], "errors": [], "attempted": []}
+        completed_plan_ids = set()
+        success_count = 0
+        failure_count = 0
 
         for plan_id in plan_ids:
             plan = self._plans_cache.get(plan_id)
             if not plan:
                 all_results["errors"].append({"plan_id": plan_id, "error": "计划不存在或已过期"})
+                failure_count += 1
+                continue
+
+            duplicate_targets = self._duplicate_target_paths(plan.changes)
+            if duplicate_targets:
+                conflict = {
+                    "plan_id": plan_id,
+                    "error": "多个源文件指向相同整理目标，已拒绝应用",
+                    "targets": duplicate_targets,
+                }
+                all_results["errors"].append(conflict)
+                failure_count += max(len(plan.changes), 1)
+                preview = self.__dict__.get("_active_preview", {}).get(plan.book_id)
+                if isinstance(preview, dict):
+                    preview["last_error"] = {"errors": [conflict]}
                 continue
 
             result = apply_plan(
@@ -412,12 +477,137 @@ class AudiobookOrganizer(_PluginBase):
                 cover_url=plan.metadata.cover_url,
                 organize_mode=self._organize_mode,
             )
-            all_results["applied"].append({"plan_id": plan_id, "book": plan.book_name, "result": result})
+            if plan.metadata.cover_url and (not plan.cover_path or not Path(plan.cover_path).is_file()):
+                cover_errors = result.get("errors")
+                if not isinstance(cover_errors, list):
+                    cover_errors = []
+                if not any(item.get("cover") == plan.cover_path for item in cover_errors if isinstance(item, dict)):
+                    cover_errors.append({"cover": plan.cover_path, "error": "封面文件未生成"})
+                result["errors"] = cover_errors
+            attempt = {"plan_id": plan_id, "book": plan.book_name, "result": result}
+            all_results["attempted"].append(attempt)
             self._append_history(plan, result)
+            raw_errors = result.get("errors")
+            raw_skipped = result.get("skipped")
+            raw_success = result.get("success")
+            file_errors = raw_errors if isinstance(raw_errors, list) else []
+            skipped = raw_skipped if isinstance(raw_skipped, list) else []
+            success = raw_success if isinstance(raw_success, list) else []
+            planned_pair_counts = Counter((change.source, change.target) for change in plan.changes)
+            reported_pairs = [
+                (item.get("source"), item.get("target"))
+                for item in success
+                if isinstance(item, dict)
+                and isinstance(item.get("source"), str)
+                and isinstance(item.get("target"), str)
+            ]
+            reported_pair_counts = Counter(reported_pairs)
+            success_matches_plan = (
+                len(success) == len(plan.changes)
+                and reported_pair_counts == planned_pair_counts
+            )
+            blocked_pairs = set()
+            blocked_sources = set()
+            blocked_targets = set()
+            for item in file_errors + skipped:
+                if not isinstance(item, dict):
+                    continue
+                source = item.get("source") if isinstance(item.get("source"), str) else None
+                target = item.get("target") if isinstance(item.get("target"), str) else None
+                if source and target:
+                    blocked_pairs.add((source, target))
+                elif source:
+                    blocked_sources.add(source)
+                elif target:
+                    blocked_targets.add(target)
+            verified_success_counts = Counter({
+                pair: min(reported_pair_counts[pair], planned_pair_counts[pair])
+                for pair in planned_pair_counts
+                if reported_pair_counts[pair] > 0
+                and pair not in blocked_pairs
+                and pair[0] not in blocked_sources
+                and pair[1] not in blocked_targets
+                and Path(pair[1]).is_file()
+            })
+            valid_success_count = sum(verified_success_counts.values())
+            success_count += valid_success_count
+            incomplete_count = max(
+                len(file_errors) + len(skipped),
+                len(plan.changes) - valid_success_count,
+                0,
+            )
+            if not file_errors and not skipped and success_matches_plan:
+                outputs_exist = all(Path(change.target).is_file() for change in plan.changes)
+                cover_exists = not plan.metadata.cover_url or bool(
+                    plan.cover_path and Path(plan.cover_path).is_file()
+                )
+                if outputs_exist and cover_exists:
+                    all_results["applied"].append(attempt)
+                    completed_plan_ids.add(plan_id)
+                else:
+                    incomplete_count = max(incomplete_count, 1)
+                    failure_count += incomplete_count
+                    result_errors = result.get("errors")
+                    if not isinstance(result_errors, list):
+                        result_errors = []
+                    for change in plan.changes:
+                        if not Path(change.target).is_file():
+                            result_errors.append({"source": change.source, "target": change.target, "error": "整理输出不存在"})
+                    result["errors"] = result_errors
+                    all_results["errors"].append({
+                        "plan_id": plan_id,
+                        "error": "整理输出未通过完整性校验",
+                        "result": result,
+                    })
+                    remaining_success_counts = verified_success_counts.copy()
+                    remaining_changes = []
+                    for change in plan.changes:
+                        pair = (change.source, change.target)
+                        if remaining_success_counts[pair] > 0:
+                            remaining_success_counts[pair] -= 1
+                        else:
+                            remaining_changes.append(change)
+                    plan.changes = remaining_changes
+                    preview = self.__dict__.get("_active_preview", {}).get(plan.book_id)
+                    if isinstance(preview, dict):
+                        preview["changes"] = [change.to_dict() for change in remaining_changes]
+                        preview["last_error"] = result
+                    continue
+            else:
+                failure_count += incomplete_count
+                remaining_success_counts = verified_success_counts.copy()
+                remaining_changes = []
+                for change in plan.changes:
+                    pair = (change.source, change.target)
+                    if remaining_success_counts[pair] > 0:
+                        remaining_success_counts[pair] -= 1
+                    else:
+                        remaining_changes.append(change)
+                plan.changes = remaining_changes
+                preview = self.__dict__.get("_active_preview", {}).get(plan.book_id)
+                if isinstance(preview, dict):
+                    preview["changes"] = [change.to_dict() for change in remaining_changes]
+                    preview["last_error"] = result
+                all_results["errors"].append({
+                    "plan_id": plan_id,
+                    "error": "整理不完整",
+                    "result": result,
+                })
 
-        applied = len(all_results["applied"])
-        failed = len(all_results["errors"])
-        message = f"整理完成：成功 {applied}，失败 {failed}"
+        warning_count = sum(
+            len(attempt.get("result", {}).get("warnings", []))
+            for attempt in all_results["attempted"]
+            if isinstance(attempt.get("result"), dict)
+            and isinstance(attempt.get("result", {}).get("warnings"), list)
+        )
+        message = f"整理完成：成功 {success_count} 个文件，失败 {failure_count} 个文件/计划"
+        if warning_count:
+            message += f"，另有 {warning_count} 个旧目标备份未清理（详情见结果）"
+        active_previews = self.__dict__.get("_active_preview", {})
+        for selected_book_id, preview in list(active_previews.items()):
+            if preview.get("plan_id") in completed_plan_ids:
+                active_previews.pop(selected_book_id, None)
+        self.__dict__["_operation_feedback"] = message
         return self._response(True, data=all_results, message=message)
 
     def api_history(self, limit: int = 20) -> schemas.Response[Dict[str, Any]]:
@@ -931,7 +1121,118 @@ class AudiobookOrganizer(_PluginBase):
                 }
             )
 
-        return [
+        selection_dialogs: List[dict] = []
+        selections = self.__dict__.get("_candidate_selection", {})
+        active_previews = self.__dict__.get("_active_preview", {})
+        for selected_book_id, preview in active_previews.items():
+            metadata = preview.get("metadata") or {}
+            changes = preview.get("changes") or []
+            last_result = preview.get("last_error") or {}
+            failed_items = (last_result.get("errors") or []) + (last_result.get("skipped") or [])
+            failure_text = "；".join(
+                str(item.get("error") or item.get("reason") or item)
+                for item in failed_items if isinstance(item, dict)
+            )
+            duplicate_targets = self._duplicate_target_paths(changes)
+            preview_actions = [{
+                "component": "VBtn",
+                "props": {"variant": "text"},
+                "text": "取消预览",
+                "events": {"click": {"api": f"plugin/{plugin_id}/selection/clear", "method": "get", "params": {"book_id": selected_book_id}}},
+            }]
+            if duplicate_targets:
+                preview_actions.append({"component": "span", "text": "目标路径冲突，无法应用；请调整命名模板后重新预览。"})
+            else:
+                preview_actions.append({
+                    "component": "VBtn",
+                    "props": {"color": "primary"},
+                    "text": "确认并整理",
+                    "events": {"click": {"api": f"plugin/{plugin_id}/apply", "method": "post", "params": {"plan_ids": [preview.get("plan_id")]}}},
+                })
+            selection_dialogs.append({
+                "component": "VDialog",
+                "props": {"modelValue": True, "max-width": 900},
+                "content": [{
+                    "component": "VCard",
+                    "content": [
+                        {"component": "VCardTitle", "text": "整理预览"},
+                        {"component": "VCardText", "content": [
+                            *([{"component": "VAlert", "props": {"type": "error", "variant": "tonal", "class": "mb-3"}, "text": f"上次整理未完成，可修复后重试：{failure_text}"}] if failure_text else []),
+                            *([{"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "class": "mb-3"}, "text": "多个文件指向相同目标路径，本计划不能应用。"}] if duplicate_targets else []),
+                            {"component": "div", "props": {"class": "text-body-1 font-weight-medium mb-2"}, "text": f"{metadata.get('title', '')} · {metadata.get('author', '')} · {metadata.get('narrator', '')}"},
+                            {"component": "div", "props": {"class": "text-caption mb-2"}, "text": f"将处理 {len(changes)} 个文件；请确认版本与目标路径后再应用。"},
+                            {"component": "VList", "props": {"density": "compact", "max-height": 320}, "content": [
+                                {"component": "VListItem", "props": {"title": item.get("source", ""), "subtitle": item.get("target", ""), "lines": "two"}}
+                                for item in changes[:50] if isinstance(item, dict)
+                            ]},
+                        ]},
+                        {"component": "VCardActions", "content": preview_actions},
+                    ],
+                }],
+            })
+        for selected_book_id, candidates in selections.items():
+            if selected_book_id in active_previews:
+                continue
+            candidate_rows = []
+            for candidate in candidates:
+                candidate_text = " · ".join(
+                    part for part in (
+                        candidate.get("title", ""),
+                        candidate.get("author", ""),
+                        candidate.get("narrator", ""),
+                        f"{candidate.get('track_count', 0)} 集" if candidate.get("track_count") else "",
+                        candidate.get("source", ""),
+                    ) if part
+                )
+                candidate_rows.append({
+                    "component": "VSheet",
+                    "props": {"class": "d-flex flex-wrap align-center justify-space-between ga-2 py-2 border-b", "color": "transparent"},
+                    "content": [
+                        {"component": "div", "props": {"class": "flex-grow-1 mr-2"}, "text": candidate_text},
+                        {
+                            "component": "VBtn",
+                            "props": {"size": "small", "color": "primary"},
+                            "text": "选择此版本",
+                            "events": {"click": {
+                                "api": f"plugin/{plugin_id}/preview",
+                                "method": "post",
+                                "params": {"book_id": selected_book_id, "candidate_id": candidate.get("candidate_id")},
+                            }},
+                        },
+                    ],
+                })
+            selection_dialogs.append({
+                "component": "VDialog",
+                "props": {"modelValue": True, "max-width": 800},
+                "content": [{
+                    "component": "VCard",
+                    "content": [
+                        {"component": "VCardTitle", "text": "选择刮削版本"},
+                        {"component": "VCardText", "content": candidate_rows or [{"component": "span", "text": "没有找到候选版本"}]},
+                        {"component": "VCardActions", "content": [{
+                            "component": "VBtn",
+                            "props": {"variant": "text"},
+                            "text": "关闭",
+                            "events": {"click": {
+                                "api": f"plugin/{plugin_id}/selection/clear",
+                                "method": "get",
+                                "params": {"book_id": selected_book_id},
+                            }},
+                        }]},
+                    ],
+                }],
+            })
+
+        feedback = self.__dict__.get("_operation_feedback")
+        feedback_nodes = []
+        if feedback:
+            feedback_nodes.append({
+                "component": "VAlert",
+                "props": {"type": "info", "variant": "tonal", "class": "mb-3"},
+                "text": feedback,
+            })
+
+        return selection_dialogs + feedback_nodes + [
             {
                 "component": "VRow",
                 "content": [
@@ -1041,16 +1342,109 @@ class AudiobookOrganizer(_PluginBase):
 
     # ──────────────────────────── 内部方法 ────────────────────────────
 
+    @staticmethod
+    def _source_fingerprint(book: BookEntry) -> List[Tuple[str, Optional[int], Optional[int], Optional[int]]]:
+        """Capture file identity and metadata without reading large audio payloads."""
+        source_files = []
+        for audio_file in sorted(book.files, key=lambda item: item.path.as_posix()):
+            try:
+                stat = audio_file.path.stat()
+                source_files.append((str(audio_file.path), stat.st_size, stat.st_mtime_ns, stat.st_ino))
+            except OSError:
+                source_files.append((str(audio_file.path), None, None, None))
+        return source_files
+
+    def _organization_signature(self, book: BookEntry, metadata: AudiobookMetadata) -> str:
+        """Fingerprint source state, selected metadata and output-affecting settings."""
+        payload = {
+            "book_id": book.book_id,
+            "source_files": self._source_fingerprint(book),
+            "metadata": metadata.to_dict(),
+            "target_path": self._target_path or self._source_path,
+            "naming_template": self._naming_template,
+            "organize_mode": self._organize_mode,
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _invalidate_organization_signature(self, book_id: str) -> None:
+        """Drop stale ownership data after cleanup so failed replacements cannot reuse it."""
+        store = self.get_data("last_organize_targets") or {}
+        if not isinstance(store, dict):
+            store = {}
+        store[book_id] = {
+            "signature": "",
+            "targets": [],
+            "expected_targets": [],
+            "output_fingerprints": {},
+            "cover_path": "",
+            "cleanup_completed": True,
+        }
+        self.save_data("last_organize_targets", store)
+
+    @staticmethod
+    def _duplicate_target_paths(changes: List[Any]) -> List[str]:
+        normalized_targets = []
+        for change in changes:
+            target = change.get("target") if isinstance(change, dict) else getattr(change, "target", "")
+            if not isinstance(target, str) or not target:
+                continue
+            try:
+                normalized_targets.append(str(Path(target).resolve()))
+            except OSError:
+                normalized_targets.append(str(Path(target).absolute()))
+        counts = Counter(normalized_targets)
+        return sorted(path for path, count in counts.items() if count > 1)
+
+    @staticmethod
+    def _path_fingerprint(path: str) -> Optional[List[int]]:
+        try:
+            stat = Path(path).stat()
+            return [stat.st_size, stat.st_mtime_ns, stat.st_ino]
+        except OSError:
+            return None
+
+    def _outputs_match_signature(self, book_id: str, signature: str) -> bool:
+        """Skip destructive rebuilds only when recorded outputs still match."""
+        store = self.get_data("last_organize_targets") or {}
+        previous = store.get(book_id) if isinstance(store, dict) else None
+        if not isinstance(previous, dict) or previous.get("signature") != signature:
+            return False
+        targets = previous.get("targets") or []
+        expected_targets = previous.get("expected_targets") or targets
+        output_fingerprints = previous.get("output_fingerprints") or {}
+        if not expected_targets or not isinstance(output_fingerprints, dict):
+            return False
+        if set(output_fingerprints) != set(expected_targets):
+            return False
+        if any(self._path_fingerprint(path) != output_fingerprints.get(path) for path in expected_targets):
+            return False
+        cover_path = previous.get("cover_path") or ""
+        return not cover_path or Path(cover_path).is_file()
+
     def _scheduled_scan(self) -> None:
         if not self._enabled or not self._source_path:
             return
 
         books = scan_directory(self._source_path)
         if not books:
+            if self.get_data("pending_notification_signatures"):
+                self.save_data("pending_notification_signatures", {})
             return
 
         notify_lines: List[str] = []
         auto_applied: List[str] = []
+        previous_pending = self.get_data("pending_notification_signatures") or {}
+        if not isinstance(previous_pending, dict):
+            previous_pending = {}
+        current_pending: Dict[str, str] = {}
+
+        def queue_pending(book: BookEntry, line: str) -> None:
+            fingerprint = json.dumps(self._source_fingerprint(book), separators=(",", ":"))
+            signature = hashlib.sha256(f"{line}\0{fingerprint}".encode("utf-8")).hexdigest()
+            current_pending[book.book_id] = signature
+            if previous_pending.get(book.book_id) != signature:
+                notify_lines.append(line)
 
         for book in books:
             try:
@@ -1080,7 +1474,7 @@ class AudiobookOrganizer(_PluginBase):
             )
 
             if not metadata.title:
-                notify_lines.append(f"• 《{book.name}》：未找到匹配元数据")
+                queue_pending(book, f"• 《{book.name}》：未找到匹配元数据")
                 continue
 
             confidence = 1.0 if used_local_fallback else compute_confidence(
@@ -1089,7 +1483,10 @@ class AudiobookOrganizer(_PluginBase):
 
             if self._monitor_mode == "auto" and used_local_fallback and confidence >= self._confidence_threshold:
                 target_root = Path(self._target_path or self._source_path)
-                cleanup_info = self._cleanup_before_organize(book, target_root)
+                signature = self._organization_signature(book, metadata)
+                if self._outputs_match_signature(book.book_id, signature):
+                    logger.info(f"[AudiobookOrganizer] 《{_safe_log_text(book.name)}》输入和输出未变化，跳过重复整理")
+                    continue
                 plan = preview_plan(
                     book,
                     metadata,
@@ -1098,6 +1495,12 @@ class AudiobookOrganizer(_PluginBase):
                     template=self._naming_template,
                     organize_mode=self._organize_mode,
                 )
+                cleanup_info = self._cleanup_before_organize(book, target_root)
+                if cleanup_info.get("errors"):
+                    logger.error(f"[AudiobookOrganizer] 无法清理《{_safe_log_text(book.name)}》的旧输出，跳过自动整理：{_safe_log_text(cleanup_info)}")
+                    queue_pending(book, f"• 《{book.name}》：清理旧输出失败，未执行自动整理")
+                    continue
+                self._invalidate_organization_signature(book.book_id)
                 result = apply_plan(
                     plan,
                     target_root=target_root,
@@ -1106,17 +1509,41 @@ class AudiobookOrganizer(_PluginBase):
                     replace_existing=True,
                 )
                 self._append_history(plan, result, cleanup=cleanup_info)
-                self._save_organize_targets(book.book_id, plan, result)
-                label = "本地信息" if used_local_fallback else f"置信度 {confidence:.0%}"
-                auto_applied.append(f"• 《{book.name}》（{label}）")
+                raw_succeeded = result.get("success")
+                raw_failed = result.get("errors")
+                raw_skipped = result.get("skipped")
+                succeeded = raw_succeeded if isinstance(raw_succeeded, list) else []
+                failed = raw_failed if isinstance(raw_failed, list) else []
+                skipped = raw_skipped if isinstance(raw_skipped, list) else []
+                complete = (
+                    not failed
+                    and not skipped
+                    and len(succeeded) == len(plan.changes)
+                    and bool(plan.changes)
+                    and all(Path(change.target).is_file() for change in plan.changes)
+                    and (not plan.metadata.cover_url or bool(plan.cover_path and Path(plan.cover_path).is_file()))
+                )
+                if complete:
+                    self._save_organize_targets(book.book_id, plan, result, signature=signature)
+                    auto_applied.append(f"• 《{book.name}》（本地信息）")
+                else:
+                    if plan.metadata.cover_url and (not plan.cover_path or not Path(plan.cover_path).is_file()):
+                        if not isinstance(raw_failed, list):
+                            raw_failed = []
+                        raw_failed.append({"cover": plan.cover_path, "error": "封面文件未生成"})
+                        result["errors"] = raw_failed
+                    logger.warning(f"[AudiobookOrganizer] 自动整理《{_safe_log_text(book.name)}》未完成：{_safe_log_text(result)}")
+                    queue_pending(book, f"• 《{book.name}》：自动整理未完成，请检查失败文件后重试")
             else:
                 if used_local_fallback:
-                    notify_lines.append(f"• 《{book.name}》：无刮削结果，可按本地信息整理")
+                    queue_pending(book, f"• 《{book.name}》：无刮削结果，可按本地信息整理")
                 else:
-                    notify_lines.append(
-                        f"• 《{book.name}》→ {metadata.title}（置信度 {confidence:.0%}，需手动确认）"
+                    queue_pending(
+                        book,
+                        f"• 《{book.name}》→ {metadata.title}（置信度 {confidence:.0%}，需手动确认）",
                     )
 
+        self.save_data("pending_notification_signatures", current_pending)
         if auto_applied:
             self.post_message(
                 title="📚 有声书整理 - 自动整理完成",
@@ -1164,7 +1591,6 @@ class AudiobookOrganizer(_PluginBase):
 
         source_root = Path(self._source_path)
         target_root = Path(self._target_path or self._source_path)
-        cleanup_info = self._cleanup_before_organize(book, target_root)
         plan = preview_plan(
             book,
             metadata,
@@ -1173,6 +1599,36 @@ class AudiobookOrganizer(_PluginBase):
             template=self._naming_template,
             organize_mode=self._organize_mode,
         )
+        signature = self._organization_signature(book, metadata)
+        if self._outputs_match_signature(book.book_id, signature):
+            self._update_book_status(book.book_id, "organized")
+            return {
+                "ok": True,
+                "book": book.name,
+                "book_id": book.book_id,
+                "title": metadata.title,
+                "local": used_local_fallback or mode == "local",
+                "mode": mode,
+                "plan_id": "",
+                "result": {"success": [], "skipped": [], "errors": []},
+                "cleanup": {"deleted": [], "deleted_count": 0},
+                "unchanged": True,
+            }
+        cleanup_info = self._cleanup_before_organize(book, target_root)
+        if cleanup_info.get("errors"):
+            self._update_book_status(book.book_id, "failed")
+            return {
+                "ok": False,
+                "book": book.name,
+                "book_id": book.book_id,
+                "title": metadata.title,
+                "local": used_local_fallback or mode == "local",
+                "mode": mode,
+                "plan_id": plan.plan_id,
+                "cleanup": cleanup_info,
+                "error": "清理旧输出失败，未执行整理",
+            }
+        self._invalidate_organization_signature(book.book_id)
         result = apply_plan(
             plan,
             target_root=target_root,
@@ -1181,7 +1637,40 @@ class AudiobookOrganizer(_PluginBase):
             replace_existing=True,
         )
         self._append_history(plan, result, cleanup=cleanup_info)
-        self._save_organize_targets(book.book_id, plan, result)
+        raw_success = result.get("success")
+        raw_errors = result.get("errors")
+        raw_skipped = result.get("skipped")
+        successes = raw_success if isinstance(raw_success, list) else []
+        errors = raw_errors if isinstance(raw_errors, list) else []
+        skipped = raw_skipped if isinstance(raw_skipped, list) else []
+        complete = (
+            bool(plan.changes)
+            and len(successes) == len(plan.changes)
+            and not errors
+            and not skipped
+            and all(Path(change.target).is_file() for change in plan.changes)
+            and (not metadata.cover_url or bool(plan.cover_path and Path(plan.cover_path).is_file()))
+        )
+        if not complete:
+            if metadata.cover_url and (not plan.cover_path or not Path(plan.cover_path).is_file()):
+                if not isinstance(raw_errors, list):
+                    raw_errors = []
+                raw_errors.append({"cover": plan.cover_path, "error": "封面文件未生成"})
+                result["errors"] = raw_errors
+            self._update_book_status(book.book_id, "failed")
+            return {
+                "ok": False,
+                "book": book.name,
+                "book_id": book.book_id,
+                "title": metadata.title,
+                "local": used_local_fallback or mode == "local",
+                "mode": mode,
+                "plan_id": plan.plan_id,
+                "result": result,
+                "cleanup": cleanup_info,
+                "error": "整理未完全成功",
+            }
+        self._save_organize_targets(book.book_id, plan, result, signature=signature)
         self._update_book_status(book.book_id, "organized")
         return {
             "ok": True,
@@ -1199,6 +1688,7 @@ class AudiobookOrganizer(_PluginBase):
         """重新整理前清理目标目录中该书的旧输出。"""
         store = self.get_data("last_organize_targets") or {}
         prev = store.get(book.book_id) if isinstance(store, dict) else None
+        has_manifest = isinstance(store, dict) and book.book_id in store
         previous_targets: List[str] = []
         previous_cover = ""
         if isinstance(prev, dict):
@@ -1206,7 +1696,7 @@ class AudiobookOrganizer(_PluginBase):
             previous_cover = str(prev.get("cover_path") or "")
 
         # 兼容升级前未落库目标路径：从历史记录里尽量找回
-        if not previous_targets:
+        if not previous_targets and not has_manifest:
             for item in self.get_data("organize_history") or []:
                 if not isinstance(item, dict):
                     continue
@@ -1228,7 +1718,24 @@ class AudiobookOrganizer(_PluginBase):
         book_id: str,
         plan: OrganizePlan,
         result: dict,
+        *,
+        signature: str = "",
     ) -> None:
+        success = result.get("success") if isinstance(result, dict) else None
+        errors = result.get("errors") if isinstance(result, dict) else None
+        skipped = result.get("skipped") if isinstance(result, dict) else None
+        expected_targets = [item.target for item in plan.changes]
+        if (
+            not expected_targets
+            or not isinstance(success, list)
+            or len(success) != len(expected_targets)
+            or errors
+            or skipped
+            or not all(Path(path).is_file() for path in expected_targets)
+            or (plan.metadata.cover_url and not (plan.cover_path and Path(plan.cover_path).is_file()))
+        ):
+            return
+
         store = self.get_data("last_organize_targets") or {}
         if not isinstance(store, dict):
             store = {}
@@ -1239,9 +1746,12 @@ class AudiobookOrganizer(_PluginBase):
         ]
         store[book_id] = {
             "targets": targets,
+            "expected_targets": expected_targets,
+            "output_fingerprints": {path: self._path_fingerprint(path) for path in expected_targets},
             "cover_path": plan.cover_path or "",
             "title": plan.metadata.title,
             "book_name": plan.book_name,
+            "signature": signature,
             "time": datetime.now(timezone.utc).isoformat(),
         }
         self.save_data("last_organize_targets", store)

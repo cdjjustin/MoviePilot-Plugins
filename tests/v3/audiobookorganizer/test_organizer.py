@@ -485,6 +485,81 @@ def test_preview_plan_uses_filename_season_episode(tmp_path: Path):
     assert "S01E304" not in plan.changes[0].target
 
 
+def test_apply_plan_reports_staged_backup_cleanup_failure_without_rolling_back(
+    sample_book, sample_metadata, tmp_path: Path, monkeypatch
+):
+    sample_metadata.cover_url = ""
+    target = tmp_path / "library"
+    plan = preview_plan(
+        sample_book,
+        sample_metadata,
+        source_root=sample_book.path.parent,
+        target_root=target,
+        organize_mode="copy",
+    )
+    previous = {}
+    for change in plan.changes:
+        path = Path(change.target)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"previous-output")
+        previous[path] = b"previous-output"
+
+    original_unlink = Path.unlink
+
+    def fail_backup_cleanup(path, *args, **kwargs):
+        if ".audiobookorganizer-" in path.name and path.name.endswith(".bak"):
+            raise PermissionError("simulated backup cleanup failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_backup_cleanup)
+    result = apply_plan(plan, target_root=target, organize_mode="copy", replace_existing=True)
+
+    assert len(result["success"]) == len(plan.changes)
+    assert not result["errors"]
+    assert len(result["warnings"]) == len(plan.changes)
+    assert all(path.is_file() and path.read_bytes() != old for path, old in previous.items())
+    assert all(Path(warning["backup"]).is_file() for warning in result["warnings"])
+
+
+@pytest.mark.parametrize("organize_mode", ["move", "copy"])
+def test_apply_plan_rolls_back_partial_placement_when_tagging_fails(
+    sample_book, sample_metadata, tmp_path: Path, monkeypatch, organize_mode: str
+):
+    import audiobookorganizer.organizer as organizer_module
+
+    sample_metadata.cover_url = ""
+    target = tmp_path / "library"
+    plan = preview_plan(
+        sample_book,
+        sample_metadata,
+        source_root=sample_book.path.parent,
+        target_root=target,
+        organize_mode=organize_mode,
+    )
+    original_sources = [Path(change.source) for change in plan.changes]
+    original_outputs = {}
+    for change in plan.changes:
+        old_target = Path(change.target)
+        old_target.parent.mkdir(parents=True, exist_ok=True)
+        old_target.write_bytes(b"previous-output")
+        original_outputs[old_target] = b"previous-output"
+
+    def fail_tagging(*args, **kwargs):
+        raise RuntimeError("simulated tag write failure")
+
+    monkeypatch.setattr(organizer_module, "write_tags", fail_tagging)
+    result = apply_plan(
+        plan,
+        target_root=target,
+        organize_mode=organize_mode,
+        replace_existing=True,
+    )
+
+    assert not result["success"]
+    assert len(result["errors"]) == len(original_sources)
+    assert all(source.is_file() for source in original_sources)
+    assert {path: path.read_bytes() for path in original_outputs} == original_outputs
+
 
 def test_apply_plan_hardlink_keeps_source(sample_book, sample_metadata, tmp_path: Path):
     source_root = sample_book.path.parent
